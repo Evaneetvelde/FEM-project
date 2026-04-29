@@ -32,7 +32,8 @@ FEM-project/
 │   ├── stiffness.py
 │   ├── plot_utils.py
 │   └── main_diffusion_1d.py
-└── tracedesancienscodepourmesurerperf/  # Anciennes versions pour benchmark
+├── tracedesancienscodepourmesurerperf/  # Anciennes versions pour benchmark
+└── old/                         # base Martin
 ```
 
 ## Installation et dépendances
