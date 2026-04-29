@@ -1,267 +1,320 @@
-# Projet FEM - Diffusion Thermique 2D par Éléments Finis
+# Projet FEM - Diffusion Thermique 2D
 
 ## Vue d'ensemble
 
-Ce projet simule la diffusion thermique avec source de reaction (type combustion) en 2D et 3D par elements finis.
+Ce projet simule une diffusion thermique transitoire en 2D par elements finis, avec :
 
-Le point d'entree est `main.py`, qui:
-- charge un maillage dans `models/`,
-- recupere les proprietes materiaux dans `materialsbank.py`,
-- utilise le code de base enseignant dans `calculs/`,
-- lance le calcul transitoire en schema theta.
+- conduction dans des materiaux heterogenes,
+- convection vers une ambiance a temperature imposee,
+- source de combustion activee au-dessus d'une temperature seuil,
+- animation de la temperature dans le maillage,
+- export du setup initial, de l'animation et de timings CSV.
+
+Le point d'entree principal est `main.py`.
 
 ## Structure du projet
 
-```
+```text
 FEM-project/
-├── main.py                      # Point d'entrée principal (refactorisé)
-├── diffusion_2D_fem.py          # Script simple didactique
-├── materialsbank.py             # Banque de matériaux
-├── README.md
-├── requirements.txt
-├── models/                      # Géométries et maillages
-│   ├── piece.geo
-│   ├── piece.msh               # Maillage 2D simple (1611 nœuds, 3084 triangles)
-│   ├── immeuble.geo
-│   └── immeuble.msh            # Maillage 2D complexe (building)
-├── calculs/                     # Code base fourni (enseignant)
-│   ├── dirichlet.py
-│   ├── errors.py
-│   ├── gmsh_utils.py
-│   ├── mass.py
-│   ├── stiffness.py
-│   ├── plot_utils.py
-│   └── main_diffusion_1d.py
-├── tracedesancienscodepourmesurerperf/  # Anciennes versions pour benchmark
-└── old/                         # base Martin
+|-- main.py
+|-- materialsbank.py
+|-- README.md
+|-- requirements.txt
+|-- models/
+|   |-- piece.geo
+|   |-- piece.msh
+|   |-- immeuble.geo
+|   `-- immeuble.msh
+|-- calculs/
+|   |-- dirichlet.py
+|   |-- errors.py
+|   |-- gmsh_utils.py
+|   |-- mass.py
+|   |-- plot_utils.py
+|   |-- stiffness.py
+|   `-- main_diffusion_1d.py
+|-- old/
+`-- tracedesancienscodepourmesurerperf/
 ```
 
-## Installation et dépendances
+## Installation
 
-Installer les dépendances :
+Installer les dependances Python :
+
 ```bash
 pip install -r requirements.txt
 ```
 
-Dépendances principales :
-- `numpy` : calcul matriciel
-- `scipy` : solveurs creux (sparse solvers)
-- `matplotlib` : visualisation et animation
-- `meshio` : lecture/écriture de maillages
-- `ffmpeg` (système) : optionnel, pour exporter les animations en MP4
+Verifier `ffmpeg` si tu veux exporter en MP4 :
 
-Vérifier l'installation de ffmpeg :
 ```bash
 ffmpeg -version
 ```
 
 ## Utilisation rapide
 
-### Option 1 : Script simple (`diffusion_2D_fem.py`)
-
-Pour un lancement simple et rapide :
-```bash
-python FEM-project/diffusion_2D_fem.py
-```
-
-**Affiche** :
-- Animation FuncAnimation en temps réel avec Tmax et temps simulé mis à jour.
-- Conditions : maillage `piece.msh`, 1000 frames, 10 sous-itérations par frame.
-
-### Option 2 : Script principal avec options (`main.py`)
-
-Lancement par défaut :
-```bash
-python FEM-project/main.py
-```
-
-Avec options (exemples) :
-```bash
-# Changer le maillage
-python FEM-project/main.py --mesh immeuble.msh
-
-# Réduire le nombre de frames (pour aller plus vite)
-python FEM-project/main.py --steps 100 --sub-steps 2
-
-# Augmenter le pas de temps (dt)
-python FEM-project/main.py --dt 5.0
-
-# Personnaliser les paramètres physiques
-python FEM-project/main.py --src-temp 1000 --src-radius 0.1
-
-# Sauvegarder l'animation en MP4 (nécessite ffmpeg)
-python FEM-project/main.py --save simulation.mp4
-
-# Sauvegarder sans affichage interactif
-python FEM-project/main.py --save simulation.mp4 --no-plot
-
-# Combinaison : accélérer ET sauvegarder
-python FEM-project/main.py --steps 100 --sub-steps 5 --save simulation_fast.mp4
-```
-
-## Options CLI de `main.py`
-
-| Option | Type | Défaut | Description |
-|--------|------|--------|-------------|
-| `--mesh` | str | `piece.msh` | Nom du maillage dans `models/` |
-| `--steps` | int | 50 | Nombre de frames d'animation |
-| `--sub-steps` | int | 1 | Sous-itérations par frame (augmente précision/temps) |
-| `--dt` | float | 2.0 | Pas de temps [s] |
-| `--h-conv` | float | 1.0 | Coefficient de convection [W/m²K] |
-| `--t-amb` | float | 293.0 | Température ambiante [K] |
-| `--src-temp` | float | 800.0 | Température initiale de la source [K] |
-| `--src-x`, `--src-y` | float | 0.0 | Position X,Y de la source [m] |
-| `--src-radius` | float | 0.05 | Rayon de la source chauffante [m] |
-| `--save` | str | None | Nom du fichier MP4 pour sauvegarder (ex: `sim.mp4`) |
-| `--no-plot` | flag | False | Désactiver l'affichage interactif (utilise avec `--save`) |
-
-## Paramètres physiques
-
-Les matériaux sont définis dans `materialsbank.py` :
-
-| Matériau | k [W/mK] | ρc [J/m³K] | Q [W/m³] | Tc [K] |
-|----------|----------|-----------|----------|--------|
-| Bois | 5.0 | 480 000 | 1.0e6 | 480 |
-| Béton | 1.0 | 500 000 | 1.2e6 | 450 |
-| Air | 2.0 | 1 200 | 0.0 | 2000 |
-
-Où :
-- `k` : conductivité thermique
-- `ρc` : capacité thermique volumique
-- `Q` : terme source de chaleur (combustion)
-- `Tc` : seuil de combustion (H>0 si T≥Tc)
-
-## Schéma numérique
-
-Le projet utilise **Euler implicite** (θ=1) pour la discrétisation temporelle :
-
-$$M \frac{T^{n+1} - T^n}{\Delta t} + K T^{n+1} = Q^n$$
-
-Où :
-- M : matrice de masse (inertie thermique)
-- K : matrice de raideur (conduction + convection)
-- Q : vecteur source (combustion)
-- Δt : pas de temps
-
-## Exemple de workflow
-
-### 1. Simulation rapide et sauvegarde MP4
+Lancement interactif :
 
 ```bash
-python FEM-project/main.py --steps 50 --sub-steps 2 --save output.mp4
+python main.py
 ```
 
-Génère `output.mp4` en ~30 secondes (dépend de ffmpeg).
-
-### 2. Étude de sensibilité sur le rayon source
+Test rapide :
 
 ```bash
-for r in 0.05 0.1 0.2; do
-  python FEM-project/main.py --src-radius $r --save sim_r${r}.mp4 --no-plot
-done
+python main.py --steps 20 --sub-steps 1
 ```
 
-### 3. Comparaison visuelle : simple vs main
+Export sans affichage interactif :
 
 ```bash
-# Terminal 1 : simple
-python FEM-project/diffusion_2D_fem.py
-
-# Terminal 2 : main.py avec les mêmes paramètres
-python FEM-project/main.py --steps 100 --sub-steps 10 --dt 4.0
+python main.py --steps 20 --save run1.mp4 --no-plot
 ```
 
-## Architecture et améliorations
+Avec `--save`, le script cree un dossier de sortie contenant :
 
-### Améliorations apportées à `main.py`
+- un PNG du setup initial,
+- l'animation exportee,
+- un `timings.csv`.
 
-1. **FuncAnimation robuste** :
-   - Passage d'état explicite via dictionnaire pour éviter les problèmes de portée.
-   - Lambda pour wrapper le callback.
-   - `blit=False` pour garantir le rafraîchissement complet à chaque frame.
+Si tu fais :
 
-2. **Sauvegarde MP4** :
-   - Utilise `FFMpegWriter` de matplotlib.
-   - FPS configurable (15 fps par défaut).
-   - Gestion d'erreur si ffmpeg n'est pas installé.
+```bash
+python main.py --save run1.mp4 --no-plot
+```
 
-3. **Code modularisé** :
-   - `_load_mesh_data()` : chargement robuste du maillage via meshio.
-   - `_assemble_system()` : assemblage FEM.
-   - `_element_matrices_2d()` : matrices élémentaires (rigidité, masse).
-   - Gestion des Physical IDs via fonction dédiée.
+alors le dossier cree sera :
 
-4. **CLI flexible** :
-   - Arguments pour tous les paramètres physiques et numériques.
-   - Defaults sensés pour lancement rapide.
+```text
+run1/
+|-- run1.mp4
+|-- setup_initial.png
+`-- timings.csv
+```
 
-### Améliorations apportées à `diffusion_2D_fem.py`
+## Options CLI
 
-1. **Affichage temps/Tmax correct** :
-   - Variable `_sim_time` cumulée à chaque frame.
-   - Format : "Temps : X.X s | Tmax : Y.Y K".
+| Option | Type | Defaut | Description |
+|---|---|---:|---|
+| `--mesh` | str | `piece.msh` | Maillage dans `models/` |
+| `--dt` | float | `10.0` | Pas de temps |
+| `--steps` | int | `2000` | Nombre de frames / pas affiches |
+| `--sub-steps` | int | `1` | Sous-iterations de calcul par frame |
+| `--theta` | float | `1.0` | Schema theta, `1.0` = Euler implicite |
+| `--h-conv` | float | `1.0` | Coefficient de convection |
+| `--t-amb` | float | `293.0` | Temperature ambiante [K] |
+| `--src-temp` | float | `800.0` | Temperature initiale de la source [K] |
+| `--src-x` | float | `0.0` | Position X de la source |
+| `--src-y` | float | `0.0` | Position Y de la source |
+| `--src-radius` | float | `0.05` | Rayon de la source initiale |
+| `--save` | str | `None` | Nom du MP4 ou dossier de sortie |
+| `--no-plot` | flag | `False` | Desactive l'affichage interactif |
 
-2. **FuncAnimation simple** :
-   - Utilise `global T, _sim_time` pour gérer l'état.
-   - Blit=True pour performance (compatible avec ce script simple).
+## Materiaux
 
-3. **Didactique** :
-   - Code court (~115 lignes avec commentaires).
-   - Facile à comprendre et modifier pour l'enseignement.
+Les materiaux sont definis dans `materialsbank.py`.
 
-## Dépannage
+| Materiau | k [W/m.K] | rho [kg/m3] | c [J/kg.K] | rho*c [J/m3.K] | Q | Tc [K] | Couleur |
+|---|---:|---:|---:|---:|---:|---:|---|
+| Bois | 0.30 | 500.0 | 1500.0 | 750000 | 1.0e6 | 480.0 | brun |
+| Beton | 1.40 | 2400.0 | 880.0 | 2112000 | 0.0 | 2000.0 | gris |
+| Verre | 0.80 | 2500.0 | 840.0 | 2100000 | 0.0 | 2000.0 | bleu clair |
+| Isolation | 0.04 | 30.0 | 1400.0 | 42000 | 0.0 | 2000.0 | beige |
+| Air | 0.03 | 1.2 | 1000.0 | 1200 | 0.0 | 2000.0 | bleu tres pale |
 
-### Animation figée (n'affiche que la première frame)
+Signification :
 
-**Cause** : `blit=True` avec artists complexes ou portée de variable cassée.
+- `k` : conductivite thermique,
+- `rho*c` : inertie thermique volumique,
+- `Q` : source de combustion locale,
+- `Tc` : seuil d'activation de la combustion.
 
-**Solution** : 
-- Vérifier que `--no-plot` n'est pas actif.
-- Utiliser `main.py` qui a la gestion d'état correcte.
+## Theorie de diffusion utilisee
 
-### Erreur "ffmpeg not found"
+### Equation continue
 
-**Cause** : ffmpeg n'est pas installé ou pas dans le PATH.
+Le modele thermique exploite dans `main.py` correspond a une equation de diffusion-reaction-convection de type :
 
-**Solutions** :
-1. Installer ffmpeg :
-   - Windows : `choco install ffmpeg` ou télécharger depuis ffmpeg.org
-   - Linux : `sudo apt install ffmpeg`
-   - macOS : `brew install ffmpeg`
+```math
+\rho c \frac{\partial T}{\partial t}
+- \nabla \cdot (k \nabla T)
++ h (T - T_{amb})
+= q(x)\,H(T - T_c)
+```
 
-2. Ou utiliser sans sauvegarde MP4 :
-   ```bash
-   python FEM-project/main.py  # affiche seulement
-   ```
+avec :
 
-### Lenteur de la simulation
+- `T(x,t)` : temperature,
+- `rho c` : capacite thermique volumique,
+- `k` : conductivite thermique,
+- `-div(k grad T)` : diffusion / conduction thermique,
+- `h (T - T_amb)` : echange convectif avec l'air ambiant,
+- `q(x)` : intensite de la source de combustion,
+- `H(T - Tc)` : activation de type Heaviside, egale a `1` quand `T >= Tc`, sinon `0`.
 
-**Causes** : `sub_steps` grand, `dt` petit, maillage fin.
+### Sens physique des termes
 
-**Solutions** :
-- Réduire `--steps` pour moins de frames.
-- Augmenter `--dt` pour des pas plus grands.
-- Réduire `--sub-steps` (minimum 1).
+- `grad T` mesure la pente locale de temperature.
+- `k grad T` represente le flux thermique de conduction.
+- `div(k grad T)` mesure combien ce flux entre ou sort localement.
+- `h (T - T_amb)` refroidit le solide quand il est plus chaud que l'ambiance, et le rechauffe s'il est plus froid.
+- `q(x) H(T - Tc)` injecte de l'energie seulement si le seuil local de combustion est depasse.
 
-## Résultats attendus
+## Equation FEM utilisee dans `main.py`
 
-Pour le maillage `piece.msh` avec paramètres par défaut :
+### Forme matricielle
 
-- **Temps de calcul** : ~1-2 min (50 frames × 1 sub_step).
-- **Évolution Tmax** : 293 K (ambiant) → ~970 K (après 50 frames × 2s).
-- **Visualisation** : gradient de température visible, combustion en zone source, diffusion vers les bords.
-- **Sauvegarde MP4** : ~3-5 MB pour 50 frames.
+Le code resout a chaque pas :
 
-## Notes techniques
+```math
+M \frac{T^{n+1} - T^n}{\Delta t}
++
+(K + h M_u) T^{n+1}
+=
+S(T^n) + h M_u T_{amb}
+```
 
-- Schéma numérique : Euler implicite (stable inconditionnellement).
-- Maillage : triangles P1 (linéaires), générés par Gmsh.
-- Solveur : SparseLU (scipy.sparse.linalg.spsolve).
-- Animation : FuncAnimation de matplotlib avec rendu Gouraud.
-- Backend matplotlib : auto (utilise le backend par défaut du système).
+Dans le code, cela correspond a :
 
-## Auteur et contact
+```python
+k_eff = k_mat + h_conv * m_unit
+src = m_unit.dot(q_node * h_act)
+conv = h_conv * m_unit.dot(ones)
+rhs = src + conv
+t = theta_step(m_mat, k_eff, rhs, rhs, t, dt=dt, theta=theta, ...)
+```
 
-Projet FEM - Université (Q6).
+### Signification des objets du code
 
-Pour questions ou améliorations : vérifier les issues ou discuter en équipe.
+- `t` : vecteur de temperatures nodales.
+- `dt` : pas de temps.
+- `m_mat` : matrice de masse thermique globale.
+- `k_mat` : matrice de conduction globale.
+- `m_unit` : matrice de masse unitaire, utilisee pour projeter les termes volumiques.
+- `h_conv` : coefficient de convection.
+- `ones = np.full(len(t), t_amb)` : vecteur contenant la temperature ambiante.
+- `q_node` : source locale de combustion par noeud.
+- `tc_node` : seuil local de combustion par noeud.
+- `h_act = (t >= tc_node).astype(float)` : active la combustion localement.
+- `src = m_unit.dot(q_node * h_act)` : second membre de combustion.
+- `conv = h_conv * m_unit.dot(ones)` : terme de convection vers l'ambiance.
+- `k_eff = k_mat + h_conv * m_unit` : operateur conduction + convection.
+
+### Forme implicite effectivement resolue
+
+Comme `theta = 1.0` par defaut, `theta_step(...)` applique Euler implicite :
+
+```math
+\left(\frac{M}{\Delta t} + K + h M_u \right) T^{n+1}
+=
+\frac{M}{\Delta t} T^n + S(T^n) + h M_u T_{amb}
+```
+
+## Assemblage FEM
+
+Les matrices globales sont construites dans `_assemble_system()` en s'appuyant sur `calculs/` :
+
+- `assemble_mass(...)` pour la masse,
+- `assemble_stiffness_and_rhs(...)` pour la raideur de conduction,
+- `theta_step(...)` pour l'avance temporelle.
+
+Pipeline principal :
+
+1. lecture du maillage via `meshio`,
+2. recuperation des triangles et des IDs physiques,
+3. construction d'une quadrature P1 triangle,
+4. assemblage de `m_unit`,
+5. assemblage de `m_mat` par groupe de materiau via `rho * c`,
+6. assemblage de `k_mat` par groupe de materiau via `k`,
+7. calcul des vecteurs `q_node` et `tc_node`.
+
+## Affichage et animation
+
+Le `main.py` :
+
+- affiche un setup initial,
+- colore legerement les zones de materiaux,
+- redessine les murs en beton de facon opaque par-dessus,
+- anime ensuite le champ de temperature.
+
+Le temps affiche dans le titre correspond au temps simule cumule.
+
+## Export et timings
+
+Quand `--save` est utilise, le script exporte :
+
+- `setup_initial.png`,
+- l'animation MP4,
+- `timings.csv`.
+
+Le CSV contient notamment :
+
+- `mesh_load`,
+- `system_assembly`,
+- `initial_conditions`,
+- `initial_setup_figure`,
+- `initial_setup_png_save`,
+- `animation_figure`,
+- `animation_save`.
+
+En mode `--no-plot`, il contient en plus des temps de calcul exploitables independants du rendu :
+
+- `frame_calculation` : temps de calcul de chaque frame,
+- `headless_calculation_total` : total du calcul thermique sans interface.
+
+## Resultats attendus
+
+Le comportement depend fortement de :
+
+- `dt`,
+- `steps`,
+- `sub_steps`,
+- `h_conv`,
+- la taille du maillage,
+- les proprietes materiau,
+- la source initiale.
+
+En pratique :
+
+- augmenter `dt` accelere le temps simule par frame,
+- augmenter `steps` prolonge la simulation,
+- augmenter `sub_steps` raffine le calcul entre deux frames,
+- augmenter `h_conv` renforce le rappel vers l'ambiance.
+
+## Depannage
+
+### `ffmpeg` non trouve
+
+Verifier :
+
+```bash
+ffmpeg -version
+```
+
+Si besoin, installer `ffmpeg` puis relancer le terminal.
+
+### Simulation lente
+
+Essayer :
+
+- moins de `steps`,
+- moins de `sub_steps`,
+- un maillage plus simple,
+- `--no-plot` pour mesurer le cout du calcul sans affichage.
+
+### Temperature tres elevee
+
+Ce n'est pas forcement un bug numerique :
+
+- la combustion reste active tant que `T >= Tc`,
+- il n'y a pas encore de modele d'extinction ou d'epuisement du combustible,
+- la convection peut etre insuffisante pour compenser la source.
+
+## Notes
+
+- Schema temporel : theta-scheme, Euler implicite par defaut.
+- Maillage : triangles P1.
+- Lecture maillage : `meshio`.
+- Assemblage : modules de `calculs/`.
+- Solveur lineaire : via `theta_step(...)`.
+- Rendu : `matplotlib`.
