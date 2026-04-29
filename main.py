@@ -1,17 +1,18 @@
 from __future__ import annotations
 
+import meshio
+import numpy as np
 import argparse
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 from matplotlib.tri import Triangulation
-import meshio
-import numpy as np
+
 from matplotlib.collections import PolyCollection
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-from matplotlib.animation import FuncAnimation
+from matplotlib.animation import FuncAnimation, FFMpegWriter
 from scipy.sparse import lil_matrix
 from scipy.sparse.linalg import spsolve
+from pathlib import Path
 
 from calculs.gmsh_utils import (gmsh_init, gmsh_finalize,prepare_quadrature_and_basis, get_jacobians,end_dofs_from_nodes)
 from calculs.stiffness import assemble_stiffness_and_rhs
@@ -26,7 +27,6 @@ PHYSICAL_ID_MAP = {
 	2: "beton",   # Physical ID 2 → Concrete (walls)
 }
 
-
 def _physical_id_to_name_map(msh: meshio.Mesh) -> dict[int, str]:
 	result: dict[int, str] = {}
 	for name, data in getattr(msh, "field_data", {}).items():
@@ -40,6 +40,31 @@ def _physical_id_to_name_map(msh: meshio.Mesh) -> dict[int, str]:
 		result = PHYSICAL_ID_MAP.copy()
 	
 	return result
+
+
+def _load_mesh_data(mesh_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[int, str]]:
+	"""Load mesh points, elements, and physical IDs using meshio.
+	
+	Returns:
+		(points_2d, triangles, physical_ids, phys_id_to_name_map)
+	"""
+	msh = meshio.read(str(mesh_path))
+	
+	# Extract 2D points
+	pts = np.asarray(msh.points, dtype=float)[:, :2]
+	
+	# Extract triangles (handle missing case gracefully)
+	elems = msh.cells_dict.get("triangle", np.array([], dtype=int))
+	elems = np.asarray(elems, dtype=int)
+	
+	# Extract physical IDs (default to 1 if missing)
+	phys = msh.cell_data_dict.get("gmsh:physical", {}).get("triangle", np.ones(len(elems), dtype=int))
+	phys = np.asarray(phys, dtype=int)
+	
+	# Get physical ID to name mapping
+	phys_name_map = _physical_id_to_name_map(msh)
+	
+	return pts, elems, phys, phys_name_map
 
 
 def _element_matrices_2d(coords: np.ndarray, k_val: float, pc: float):
@@ -95,7 +120,7 @@ def _assemble_system(points: np.ndarray, elems: np.ndarray, phys_ids: np.ndarray
 
 def _scenario_defaults() -> dict:
 	return {
-		"dt": 2.0,
+		"dt": 10.0,
 		"steps": 50,
 		"sub_steps": 1,
 		"theta": 1.0,
@@ -104,7 +129,7 @@ def _scenario_defaults() -> dict:
 		"src_temp": 800.0,
 		"src_x": 0.0,
 		"src_y": 0.0,
-		"src_radius": 0.5,
+		"src_radius": 0.05,
 	}
 
 
@@ -122,11 +147,12 @@ def _build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--src-y", type=float, default=None, help="Y source")
 	parser.add_argument("--src-radius", type=float, default=None, help="Rayon source (2D)")
 	parser.add_argument("--no-plot", dest="plot", action="store_false", help="Desactive l'affichage final")
+	parser.add_argument("--save", dest="save", type=str, default=None, help="Nom de fichier MP4 pour sauvegarder l'animation (requires ffmpeg)")
 	parser.set_defaults(plot=True)
 	return parser
 
 
-def run(args: argparse.Namespace) -> np.ndarray:
+def run(args: argparse.Namespace):
 	defaults = _scenario_defaults()
 	dt = float(args.dt if args.dt is not None else defaults["dt"])
 	steps = int(args.steps if args.steps is not None else defaults["steps"])
@@ -147,11 +173,7 @@ def run(args: argparse.Namespace) -> np.ndarray:
 		mesh_path = candidate if candidate.exists() else base_dir / "models" / mesh_file
 	print(f"Using mesh: {mesh_path}")
 
-	msh = meshio.read(str(mesh_path))
-	pts = np.asarray(msh.points, dtype=float)[:, :2]
-	elems = _get_cells(msh)
-	phys = _get_physical_ids(msh, elems.shape[0])
-	phys_name_map = _physical_id_to_name_map(msh)
+	pts, elems, phys, phys_name_map = _load_mesh_data(mesh_path)
 	print(f"Maillage charge: {len(pts)} noeuds, {len(elems)} elements (2D).")
 
 	k_mat, m_mat, m_unit, q_node, tc_node = _assemble_system(pts, elems, phys, phys_name_map)
@@ -160,73 +182,60 @@ def run(args: argparse.Namespace) -> np.ndarray:
 	t[dist <= src_radius] = src_temp
 
 	ones = np.full(len(t), t_amb, dtype=float)
-	a_lhs = m_mat.tocsr().multiply(1.0 / dt) + (k_mat + h_conv * m_unit).tocsr()
-
-	walls_id = None
-	for pid, name in phys_name_map.items():
-		if any(k in name.lower() for k in ("mur", "murs", "wall", "walls")):
-			walls_id = pid
-			break
+	# build lhs matrix for implicit Euler
+	a_lhs = (m_mat / dt + k_mat).tocsr()
 
 	fig, ax = plt.subplots(figsize=(10, 8))
-	vmin_plot = t_amb
-	vmax_plot = max(src_temp, float(np.max(t)))
 	triang = Triangulation(pts[:, 0], pts[:, 1], elems)
-	cbar = None
 
-	def draw_frame(field: np.ndarray, time_s: float) -> None:
-		nonlocal cbar
-		ax.clear()
-		im = ax.tripcolor(triang, np.asarray(field, dtype=float), cmap="magma", shading="gouraud", vmin=vmin_plot, vmax=vmax_plot)
-		
-		if walls_id is not None and phys is not None:
-			wall_mask = np.asarray(phys) == walls_id
-			murs_elements = elems[wall_mask]
-			if len(murs_elements) > 0:
-				verts = [pts[tri, :2] for tri in murs_elements]
-				murs_poly = PolyCollection(verts, facecolors="#808080", edgecolors="black", linewidths=0.5, zorder=3)
-				ax.add_collection(murs_poly)
-		
-		ax.set_aspect("equal")
-		ax.set_facecolor("#1A12BD")
-		ax.set_title(f"Temps: {time_s:.1f}s | Tmax: {float(np.max(field)):.1f}K")
-		
-		# Update or recreate colorbar
-		if cbar is not None:
-			cbar.remove()
-		cbar = fig.colorbar(im, ax=ax, label="Temperature [K]")
-		
-		fig.canvas.draw_idle()
-		fig.canvas.flush_events()
+	# Use temperature at nodes (points) for smooth gouraud shading
+	im = ax.tripcolor(triang, t, cmap="magma", shading="gouraud", vmin=t_amb, vmax=1500)
 
-	def do_step() -> np.ndarray:
-		nonlocal t
-		h_act = (t >= tc_node).astype(float)
-		src = m_unit.dot(q_node * h_act)
-		conv = m_unit.dot(h_conv * ones)
-		rhs = (m_mat / dt).dot(t) + src + conv
-		res = spsolve(a_lhs, rhs)
-		t = np.asarray(res, dtype=float)
-		return np.asarray(t, dtype=float)
+	# draw walls once (keep as permanent artists)
+	murs_elements = elems[np.where(phys == 2)[0]]
+	verts = [pts[tri, :2] for tri in murs_elements]
+	murs_poly = PolyCollection(verts, facecolors="#808080", edgecolors="black", linewidths=0.5, zorder=3)
+	ax.add_collection(murs_poly)
 
-	plt.ion()
-	plt.show(block=False)
-	draw_frame(t, 0.0)
-	plt.tight_layout()
-	plt.pause(0.001)
+	ax.set_aspect("equal")
+	ax.set_facecolor("#1A12BD")
+	plt.colorbar(im, ax=ax, label="Temperature [K]")
+	#plt.axis(False)
+	state = {"t": t}
 
-	for frame in range(steps):
+	# Animation update: perform sub_steps of computation, update per-triangle colors and title
+	def update_anim(frame_idx: int, state: dict[str, np.ndarray]):
+		t = state["t"]
 		for _ in range(sub_steps):
-			do_step()
-		t_sim = (frame + 1) * dt * sub_steps
-		draw_frame(t, t_sim)
-		plt.pause(0.05)  # Increased pause to ensure display updates
+			h_act = (t >= tc_node).astype(float)
+			src = m_unit.dot(q_node * h_act)
+			conv = m_unit.dot(h_conv * ones)
+			rhs = (m_mat / dt).dot(t) + src + conv
+			t = np.asarray(spsolve(a_lhs, rhs), dtype=float)
+		state["t"] = t
+		Tmax = float(np.max(t))
+		print(f"frame {frame_idx}: Tmax={Tmax:.2f}")
+		# Update nodal values (points) for tripcolor with gouraud shading
+		im.set_array(t)
+		ax.set_title(f"Temps: {frame_idx * dt * sub_steps:.1f}s | Tmax: {float(np.max(t)):.1f}K")
+		return [im]
 
-	plt.ioff()
+	# Use FuncAnimation to drive the loop reliably and keep a reference to the animator
+	ani = FuncAnimation(fig, lambda frame_idx: update_anim(frame_idx, state), frames=steps, interval=100, blit=False)
+	plt.tight_layout()
+	# Save animation if requested
+	if getattr(args, "save", None):
+		save_path = args.save
+		print(f"Sauvegarde de l'animation dans {save_path} ...")
+		try:
+			writer = FFMpegWriter(fps=15, metadata={"artist": "Simulation"}, bitrate=2000)
+			ani.save(save_path, writer=writer)
+			print("Enregistrement termine.")
+		except Exception as e:
+			print(f"Echec de la sauvegarde: {e}")
+	# Show interactively if requested
 	if args.plot:
 		plt.show()
-
-	return t
 
 
 def main() -> None:
@@ -235,7 +244,7 @@ def main() -> None:
 	if args.mesh is None:
 		args.mesh = "piece.msh"
 	run(args)
-
+	
 
 if __name__ == "__main__":
 	main()

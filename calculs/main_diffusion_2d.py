@@ -1,7 +1,6 @@
 # main_diffusion_1d.py
 import argparse
 import numpy as np
-
 from gmsh_utils import (
     getPhysical, gmsh_init, gmsh_finalize, open_2d_mesh,
     prepare_quadrature_and_basis, get_jacobians,
