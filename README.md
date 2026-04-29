@@ -1,8 +1,8 @@
-# Projet FEM - Diffusion Thermique 2D
+# Projet FEM - Diffusion Thermique 2D/3D
 
 ## Vue d'ensemble
 
-Ce projet simule une diffusion thermique transitoire en 2D par éléments finis, avec :
+Ce projet simule une diffusion thermique transitoire en 2D et 3D par éléments finis, avec :
 
 - conduction dans des matériaux heterogenes,
 - convection vers une ambiance a température imposée,
@@ -11,6 +11,8 @@ Ce projet simule une diffusion thermique transitoire en 2D par éléments finis,
 - export du setup initial, de l'animation et de timings CSV.
 
 Le point d'entrée principal est `main.py`.
+
+La gestion 3D est deja prise en charge par `main.py` et les maillages du dossier `models/`. Les modules du dossier `calculs/` n'ont pas ete modifies, car ils supportent deja la 3D.
 
 ## Structure du projet
 
@@ -51,6 +53,14 @@ Lancement interactif :
 python main.py
 ```
 
+Forcer la version 3D :
+
+```bash
+python main.py --3d
+```
+
+En 3D, le maillage utilise par defaut `models/immeuble.msh` ; en 2D, `models/piece.msh` reste le choix par defaut.
+
 Test rapide :
 
 ```bash
@@ -89,6 +99,8 @@ run1/
 | Option | Type | Defaut | Description |
 |---|---|---:|---|
 | `--mesh` | str | `piece.msh` | Maillage dans `models/` |
+| `--2d` | flag | `False` | Force l'execution en 2D |
+| `--3d` | flag | `False` | Force l'execution en 3D |
 | `--dt` | float | `10.0` | Pas de temps |
 | `--steps` | int | `2000` | Nombre de frames / pas affiches |
 | `--sub-steps` | int | `1` | Sous-iterations de calcul par frame |
