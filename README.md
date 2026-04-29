@@ -2,15 +2,15 @@
 
 ## Vue d'ensemble
 
-Ce projet simule une diffusion thermique transitoire en 2D par elements finis, avec :
+Ce projet simule une diffusion thermique transitoire en 2D par éléments finis, avec :
 
-- conduction dans des materiaux heterogenes,
-- convection vers une ambiance a temperature imposee,
+- conduction dans des matériaux heterogenes,
+- convection vers une ambiance a température imposée,
 - source de combustion activee au-dessus d'une temperature seuil,
-- animation de la temperature dans le maillage,
+- animation de la température dans le maillage,
 - export du setup initial, de l'animation et de timings CSV.
 
-Le point d'entree principal est `main.py`.
+Le point d'entrée principal est `main.py`.
 
 ## Structure du projet
 
@@ -31,24 +31,16 @@ FEM-project/
 |   |-- gmsh_utils.py
 |   |-- mass.py
 |   |-- plot_utils.py
-|   |-- stiffness.py
-|   `-- main_diffusion_1d.py
+|   `-- stiffness.py
 |-- old/
 `-- tracedesancienscodepourmesurerperf/
 ```
 
 ## Installation
 
-Installer les dependances Python :
-
 ```bash
-pip install -r requirements.txt
-```
-
-Verifier `ffmpeg` si tu veux exporter en MP4 :
-
-```bash
-ffmpeg -version
+pip install -r requirements.txt    
+ffmpeg -version                    #pour la sauvegarde d'animation
 ```
 
 ## Utilisation rapide
