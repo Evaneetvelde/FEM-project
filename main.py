@@ -109,6 +109,12 @@ def _load_mesh_data(mesh_path: Path, dim: int) -> tuple[np.ndarray, np.ndarray, 
 		msh.cell_data_dict.get("gmsh:physical", {}).get(cell_type, np.ones(len(elems), dtype=int)),
 		dtype=int,
 	)
+
+	# Fusion des noeuds doublons (repare les maillages non-conformes/entites separees)
+	unique_pts, inverse = np.unique(np.round(pts, 7), axis=0, return_inverse=True)
+	pts = unique_pts
+	elems = inverse[elems]
+
 	phys_name_map = _physical_id_to_name_map(msh, dim)
 	return pts, elems, phys, phys_name_map
 
@@ -454,7 +460,7 @@ def _set_equal_3d_axes(ax, points: np.ndarray) -> None:
 def _scenario_defaults(dim: int) -> dict[str, float | int]:
 	if dim == 3:
 		return {
-			"dt": 10.0,
+			"dt": 10000.0,
 			"steps": 400,
 			"sub_steps": 1,
 			"theta": 1.0,
@@ -467,7 +473,7 @@ def _scenario_defaults(dim: int) -> dict[str, float | int]:
 			"src_radius": 1.0,
 		}
 	return {
-		"dt": 10.0,
+		"dt": 100.0,
 		"steps": 2000,
 		"sub_steps": 1,
 		"theta": 1.0,
