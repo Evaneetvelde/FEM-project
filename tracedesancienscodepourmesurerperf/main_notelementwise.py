@@ -15,17 +15,16 @@ from matplotlib.collections import PolyCollection
 from matplotlib.colors import LinearSegmentedColormap, Normalize
 from matplotlib.patches import Circle, Patch
 from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
-from scipy.sparse import coo_matrix, csr_matrix, diags
+from scipy.sparse import csr_matrix, diags
 
 from calculs.dirichlet import theta_step
+from calculs.mass import assemble_mass
+from calculs.stiffness import assemble_stiffness_and_rhs
 from materialsbank import get_burn_material_name, get_material, get_material_color, get_material_overlay_alpha
 
 PHYSICAL_ID_MAP_2D = {
 	1: "bois",
 	2: "beton",
-	5: "air",
-	11: "bois",
-	12: "air",
 }
 
 PHYSICAL_ID_MAP_3D = {
@@ -52,18 +51,6 @@ THERMAL_CMAP = LinearSegmentedColormap.from_list(
 	N=256,
 )
 
-THERMAL_CMAP_3D = LinearSegmentedColormap.from_list(
-	"thermal_3d_white_purple_red",
-	[
-		(1.0, 1.0, 1.0, 1.0),
-		(0.45, 0.0, 0.75, 1.0),
-		(1.0, 0.0, 0.0, 1.0),
-	],
-	N=256,
-)
-THERMAL_3D_VMIN = 200.0
-THERMAL_3D_VMAX = 10000.0
-
 
 @dataclass
 class BoundaryConditionField:
@@ -82,27 +69,6 @@ class VolumeLossField:
 	t_ext: float
 	loss_matrix: csr_matrix
 	rhs: np.ndarray
-
-
-@dataclass
-class ElementwiseSystem:
-	k_mat: csr_matrix
-	m_mat: csr_matrix
-	m_unit: csr_matrix
-	unit_load_local: np.ndarray
-	q_node: np.ndarray
-	tc_node: np.ndarray
-	elem_material_names: np.ndarray
-	delta_k_local: np.ndarray
-	delta_m_local: np.ndarray
-
-
-@dataclass
-class VerticalHeatTransferField:
-	enabled: bool
-	targets: list[np.ndarray]
-	dz: list[np.ndarray]
-	element_volumes: np.ndarray
 
 
 def _physical_id_to_name_map(msh: meshio.Mesh, dim: int) -> dict[int, str]:
@@ -283,148 +249,79 @@ def _initial_element_materials(phys_ids: np.ndarray, phys_name_map: dict[int, st
 	return np.asarray([str(phys_name_map.get(int(pid), "bois")).strip().lower() for pid in phys_ids], dtype=object)
 
 
-def _node_reaction_fields(elems: np.ndarray, elem_material_names: np.ndarray, n_nodes: int) -> tuple[np.ndarray, np.ndarray]:
-	q_node = np.zeros(n_nodes, dtype=float)
-	tc_node = np.full(n_nodes, np.inf, dtype=float)
-	for nodes, mat_name in zip(elems, elem_material_names, strict=False):
-		mat = get_material(str(mat_name))
-		for ni in nodes:
-			q_node[int(ni)] = max(q_node[int(ni)], float(mat["Q"]))
-			tc_node[int(ni)] = min(tc_node[int(ni)], float(mat["Tc"]))
-	return q_node, tc_node
-
-
-def _local_unit_matrices(points: np.ndarray, elems: np.ndarray, dim: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-	w, n_ref, grad_ref, jac, det, _coords = _build_p1_quadrature(points, elems, dim)
-	ne = len(elems)
-	nloc = elems.shape[1]
-	ngp = len(w)
-	unit_mass = np.zeros((ne, nloc, nloc), dtype=float)
-	unit_stiffness = np.zeros((ne, nloc, nloc), dtype=float)
-	unit_load = np.zeros((ne, nloc), dtype=float)
-
-	for e in range(ne):
-		for g in range(ngp):
-			wg_det = float(w[g] * det[e, g])
-			inv_jac = np.linalg.inv(jac[e, g])
-			grads = np.array([inv_jac @ grad_ref[g, a] for a in range(nloc)], dtype=float)
-			for a in range(nloc):
-				unit_load[e, a] += wg_det * float(n_ref[g, a])
-				for b in range(nloc):
-					unit_mass[e, a, b] += wg_det * float(n_ref[g, a] * n_ref[g, b])
-					unit_stiffness[e, a, b] += wg_det * float(np.dot(grads[a], grads[b]))
-
-	return unit_mass, unit_stiffness, unit_load
-
-
-def _assemble_sparse_from_local(elems: np.ndarray, local_values: np.ndarray, n_nodes: int) -> csr_matrix:
-	nloc = elems.shape[1]
-	rows = np.repeat(elems, nloc, axis=1).reshape(-1)
-	cols = np.tile(elems, (1, nloc)).reshape(-1)
-	data = local_values.reshape(-1)
-	return coo_matrix((data, (rows, cols)), shape=(n_nodes, n_nodes)).tocsr()
-
-
-def _assemble_vector_from_local(elems: np.ndarray, local_values: np.ndarray, n_nodes: int) -> np.ndarray:
-	values = np.zeros(n_nodes, dtype=float)
-	np.add.at(values, elems.reshape(-1), local_values.reshape(-1))
-	return values
-
-
-def _default_vertical_air_radius(points: np.ndarray, elems: np.ndarray) -> float:
-	centroids = np.mean(points[elems], axis=1)
-	spans = np.ptp(centroids[:, :2], axis=0)
-	area = max(float(spans[0] * spans[1]), 1e-12)
-	return 1.5 * float(np.sqrt(area / max(len(elems), 1)))
-
-
-def _build_vertical_heat_transfer_field(
-	points: np.ndarray,
-	elems: np.ndarray,
-	unit_load_local: np.ndarray,
-	dim: int,
-	enabled: bool,
-	attenuation_per_m: float,
-	horizontal_radius: float,
-) -> VerticalHeatTransferField:
-	element_volumes = np.sum(unit_load_local, axis=1)
-	if dim != 3 or not enabled:
-		return VerticalHeatTransferField(False, [], [], element_volumes)
-
-	centroids = np.mean(points[elems], axis=1)
-	radius = float(horizontal_radius) if horizontal_radius > 0.0 else _default_vertical_air_radius(points, elems)
-	attenuation = max(0.0, float(attenuation_per_m))
-	targets: list[np.ndarray] = []
-	dz_by_source: list[np.ndarray] = []
-
-	for source_idx, source_center in enumerate(centroids):
-		dz = centroids[:, 2] - source_center[2]
-		horizontal_dist = np.linalg.norm(centroids[:, :2] - source_center[:2], axis=1)
-		mask = (dz > 0.0) & (horizontal_dist <= radius)
-		local_factors = np.maximum(0.0, 1.0 - attenuation * dz[mask])
-		valid = local_factors > 0.0
-		targets.append(np.flatnonzero(mask)[valid])
-		dz_by_source.append(dz[mask][valid])
-
-	return VerticalHeatTransferField(True, targets, dz_by_source, element_volumes)
-
-
-def _assemble_elementwise_system(
+def _assemble_system(
 	points: np.ndarray,
 	elems: np.ndarray,
 	phys_ids: np.ndarray,
 	phys_name_map: dict[int, str],
 	dim: int,
-) -> ElementwiseSystem:
+	elem_material_names: np.ndarray | None = None,
+):
 	n_nodes = points.shape[0]
-	elem_material_names = _initial_element_materials(phys_ids, phys_name_map)
-	unit_mass, unit_stiffness, unit_load = _local_unit_matrices(points, elems, dim)
+	q_node = np.zeros(n_nodes, dtype=float)
+	tc_node = np.full(n_nodes, np.inf, dtype=float)
+	tag_to_dof = np.arange(n_nodes, dtype=int)
+	elem_tags = np.arange(len(elems), dtype=int)
+	conn = np.asarray(elems, dtype=int)
+	conn_flat = conn.reshape(-1)
+	w, n_ref, grad_ref, jac, det, coords = _build_p1_quadrature(points, elems, dim)
 
-	base_k_local = np.zeros_like(unit_stiffness)
-	base_m_local = np.zeros_like(unit_mass)
-	delta_k_local = np.zeros_like(unit_stiffness)
-	delta_m_local = np.zeros_like(unit_mass)
+	m_unit = assemble_mass(elem_tags, conn_flat, det, w, n_ref, tag_to_dof).tocsr()
+	k_glob = csr_matrix((n_nodes, n_nodes), dtype=float)
+	m_glob = csr_matrix((n_nodes, n_nodes), dtype=float)
+	processed_materials: set[str] = set()
 
-	for e, mat_name in enumerate(elem_material_names):
-		mat = get_material(str(mat_name))
-		burn_mat = get_material(get_burn_material_name(str(mat_name)))
-		base_k = float(mat["k"])
-		base_pc = float(mat["rho"]) * float(mat["c"])
-		burn_k = float(burn_mat["k"])
-		burn_pc = float(burn_mat["rho"]) * float(burn_mat["c"])
+	for e, nodes in enumerate(conn):
+		mat_name = (
+			str(elem_material_names[e]).strip().lower()
+			if elem_material_names is not None
+			else str(phys_name_map.get(int(phys_ids[e]), "bois")).strip().lower()
+		)
+		mat = get_material(mat_name)
 
-		base_k_local[e] = base_k * unit_stiffness[e]
-		base_m_local[e] = base_pc * unit_mass[e]
-		delta_k_local[e] = (burn_k - base_k) * unit_stiffness[e]
-		delta_m_local[e] = (burn_pc - base_pc) * unit_mass[e]
+		for ni in nodes:
+			q_node[ni] = max(q_node[ni], float(mat["Q"]))
+			tc_node[ni] = min(tc_node[ni], float(mat["Tc"]))
 
-	k_mat = _assemble_sparse_from_local(elems, base_k_local, n_nodes)
-	m_mat = _assemble_sparse_from_local(elems, base_m_local, n_nodes)
-	m_unit = _assemble_sparse_from_local(elems, unit_mass, n_nodes)
-	q_node, tc_node = _node_reaction_fields(elems, elem_material_names, n_nodes)
+		if mat_name in processed_materials:
+			continue
 
-	return ElementwiseSystem(
-		k_mat=k_mat,
-		m_mat=m_mat,
-		m_unit=m_unit,
-		unit_load_local=unit_load,
-		q_node=q_node,
-		tc_node=tc_node,
-		elem_material_names=elem_material_names,
-		delta_k_local=delta_k_local,
-		delta_m_local=delta_m_local,
-	)
+		if elem_material_names is None:
+			mat_mask = np.array(
+				[str(phys_name_map.get(int(pid_local), "bois")).strip().lower() == mat_name for pid_local in phys_ids],
+				dtype=bool,
+			)
+		else:
+			mat_mask = np.asarray(elem_material_names, dtype=object) == mat_name
+		group_tags = elem_tags[mat_mask]
+		group_conn = conn[mat_mask]
+		group_conn_flat = group_conn.reshape(-1)
+		group_jac = jac[mat_mask]
+		group_det = det[mat_mask]
+		group_coords = coords[mat_mask]
+		pc = float(mat["rho"]) * float(mat["c"])
+		k_val = float(mat["k"])
 
+		group_mass = assemble_mass(group_tags, group_conn_flat, group_det, w, n_ref, tag_to_dof).tocsr()
+		group_stiffness, _ = assemble_stiffness_and_rhs(
+			group_tags,
+			group_conn_flat,
+			group_jac,
+			group_det,
+			group_coords,
+			w,
+			n_ref,
+			grad_ref,
+			lambda _x, k=k_val: k,
+			lambda _x: 0.0,
+			tag_to_dof,
+		)
 
-def _apply_burn_deltas(system: ElementwiseSystem, elems: np.ndarray, burned_indices: np.ndarray) -> None:
-	if len(burned_indices) == 0:
-		return
-	n_nodes = system.k_mat.shape[0]
-	system.k_mat = system.k_mat + _assemble_sparse_from_local(elems[burned_indices], system.delta_k_local[burned_indices], n_nodes)
-	system.m_mat = system.m_mat + _assemble_sparse_from_local(elems[burned_indices], system.delta_m_local[burned_indices], n_nodes)
-	for elem_idx in burned_indices:
-		system.elem_material_names[int(elem_idx)] = get_burn_material_name(str(system.elem_material_names[int(elem_idx)]))
-	system.q_node, system.tc_node = _node_reaction_fields(elems, system.elem_material_names, n_nodes)
+		m_glob = m_glob + pc * group_mass
+		k_glob = k_glob + group_stiffness.tocsr()
+		processed_materials.add(mat_name)
+
+	return k_glob, m_glob, m_unit, q_node, tc_node
 
 
 def _extract_boundary_faces(elems: np.ndarray, phys_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -556,76 +453,19 @@ def _radiation_loss_rhs(m_unit: csr_matrix, local_t: np.ndarray, volume_loss: Vo
 	return np.asarray(m_unit.dot(power_density), dtype=float)
 
 
-def _heat_release_rate(material: dict[str, object], elem_temp: float, burn_age: float) -> float:
-	_ = elem_temp
-	peak_hrr = max(0.0, float(material.get("hrr", 0.0)))
-	duration = max(0.0, float(material.get("hrr_duration", 0.0)))
-	if peak_hrr <= 0.0 or duration <= 0.0 or burn_age >= duration:
-		return 0.0
-
-	ramp_end = 0.10 * duration
-	decay_start = 0.75 * duration
-	if burn_age < ramp_end:
-		return peak_hrr * (burn_age / max(ramp_end, 1e-12))
-	if burn_age < decay_start:
-		return peak_hrr
-	return peak_hrr * max(0.0, (duration - burn_age) / max(duration - decay_start, 1e-12))
-
-
-def _hrr_source_rhs(
-	system: ElementwiseSystem,
-	elems: np.ndarray,
-	burned_elements: np.ndarray,
-	local_t: np.ndarray,
-	burn_times: np.ndarray,
-	sim_time: float,
-	vertical_transfer: VerticalHeatTransferField | None = None,
-	vertical_attenuation: float = 0.25,
-) -> np.ndarray:
-	burned_indices = np.flatnonzero(burned_elements)
-	if len(burned_indices) == 0:
-		return np.zeros(system.m_mat.shape[0], dtype=float)
-
-	elem_temperatures = np.mean(local_t[elems[burned_indices]], axis=1)
-	local_loads = np.zeros((len(burned_indices), elems.shape[1]), dtype=float)
-	vertical_load_by_element: dict[int, np.ndarray] = {}
-	for local_idx, elem_idx in enumerate(burned_indices):
-		material = get_material(str(system.elem_material_names[int(elem_idx)]))
-		burn_age = max(0.0, sim_time - float(burn_times[int(elem_idx)]))
-		hrr = _heat_release_rate(material, float(elem_temperatures[local_idx]), burn_age)
-		local_loads[local_idx] = hrr * system.unit_load_local[int(elem_idx)]
-
-		if vertical_transfer is not None and vertical_transfer.enabled and hrr > 0.0:
-			source_power = hrr * float(vertical_transfer.element_volumes[int(elem_idx)])
-			for target_idx, dz in zip(vertical_transfer.targets[int(elem_idx)], vertical_transfer.dz[int(elem_idx)], strict=False):
-				factor = max(0.0, 1.0 - max(0.0, float(vertical_attenuation)) * float(dz))
-				if factor <= 0.0:
-					continue
-				target_volume = max(float(vertical_transfer.element_volumes[int(target_idx)]), 1e-12)
-				target_load = source_power * factor * system.unit_load_local[int(target_idx)] / target_volume
-				if int(target_idx) in vertical_load_by_element:
-					vertical_load_by_element[int(target_idx)] += target_load
-				else:
-					vertical_load_by_element[int(target_idx)] = target_load.copy()
-
-	rhs = _assemble_vector_from_local(elems[burned_indices], local_loads, system.m_mat.shape[0])
-	if vertical_load_by_element:
-		target_indices = np.asarray(list(vertical_load_by_element.keys()), dtype=int)
-		target_loads = np.asarray([vertical_load_by_element[int(idx)] for idx in target_indices], dtype=float)
-		rhs += _assemble_vector_from_local(elems[target_indices], target_loads, system.m_mat.shape[0])
-	return rhs
-
-
 def _update_burned_elements(
 	burned_elements: np.ndarray,
+	elem_material_names: np.ndarray,
 	elems: np.ndarray,
 	local_t: np.ndarray,
 	elem_tc: np.ndarray,
-) -> np.ndarray:
+) -> int:
 	elem_temperatures = np.mean(local_t[elems], axis=1)
 	newly_burned = (~burned_elements) & (elem_temperatures >= elem_tc)
 	burned_elements[newly_burned] = True
-	return np.flatnonzero(newly_burned)
+	for elem_idx in np.flatnonzero(newly_burned):
+		elem_material_names[int(elem_idx)] = get_burn_material_name(str(elem_material_names[int(elem_idx)]))
+	return int(np.count_nonzero(newly_burned))
 
 
 def _burned_triangle_vertices(points: np.ndarray, elems: np.ndarray, burned_elements: np.ndarray) -> list[np.ndarray]:
@@ -645,22 +485,6 @@ def _burned_tetra_face_vertices(points: np.ndarray, elems: np.ndarray, burned_el
 			]
 		)
 	return face_vertices
-
-
-def _burned_boundary_face_mask(boundary_faces: np.ndarray, elems: np.ndarray, burned_elements: np.ndarray) -> np.ndarray:
-	burned_faces: set[tuple[int, int, int]] = set()
-	for tet in elems[burned_elements]:
-		i, j, k, l = [int(v) for v in tet]
-		burned_faces.add(tuple(sorted((i, j, k))))
-		burned_faces.add(tuple(sorted((i, j, l))))
-		burned_faces.add(tuple(sorted((i, k, l))))
-		burned_faces.add(tuple(sorted((j, k, l))))
-	return np.asarray([tuple(sorted(int(v) for v in face)) in burned_faces for face in boundary_faces], dtype=bool)
-
-
-def _burned_boundary_face_vertices(points: np.ndarray, boundary_faces: np.ndarray, elems: np.ndarray, burned_elements: np.ndarray) -> list[np.ndarray]:
-	mask = _burned_boundary_face_mask(boundary_faces, elems, burned_elements)
-	return [points[face] for face in boundary_faces[mask]]
 
 
 def _build_region_legend_handles(regions: list[dict[str, object]]) -> list[Patch]:
@@ -857,7 +681,7 @@ def _set_equal_3d_axes(ax, points: np.ndarray) -> None:
 def _scenario_defaults(dim: int) -> dict[str, float | int]:
 	if dim == 3:
 		return {
-			"dt": 100.0,
+			"dt": 10000.0,
 			"steps": 400,
 			"sub_steps": 1,
 			"theta": 1.0,
@@ -865,19 +689,15 @@ def _scenario_defaults(dim: int) -> dict[str, float | int]:
 			"general_loss": 0.2,
 			"vent_loss": 1.0,
 			"radiation_loss": 5.0e-8,
-			"vertical_air_transfer": 1,
-			"vertical_air_attenuation": 0.25,
-			"vertical_air_radius": 0.0,
-			"vertical_air_random_delta": 0.2,
 			"t_amb": 293.0,
 			"src_temp": 800.0,
-			"src_x": 2.0,
-			"src_y": 2.0,
+			"src_x": 1.0,
+			"src_y": 1.0,
 			"src_z": 0.5,
 			"src_radius": 1.0,
 		}
 	return {
-		"dt": 50.0,
+		"dt": 100.0,
 		"steps": 2000,
 		"sub_steps": 1,
 		"theta": 1.0,
@@ -885,10 +705,6 @@ def _scenario_defaults(dim: int) -> dict[str, float | int]:
 		"general_loss": 0.2,
 		"vent_loss": 1.0,
 		"radiation_loss": 5.0e-8,
-		"vertical_air_transfer": 0,
-		"vertical_air_attenuation": 0.25,
-		"vertical_air_radius": 0.0,
-		"vertical_air_random_delta": 0.0,
 		"t_amb": 293.0,
 		"src_temp": 800.0,
 		"src_x": 0.0,
@@ -934,10 +750,6 @@ def run(args: argparse.Namespace):
 	general_loss = float(args.general_loss if args.general_loss is not None else defaults["general_loss"])
 	vent_loss = float(args.vent_loss if args.vent_loss is not None else defaults["vent_loss"])
 	radiation_loss = float(args.radiation_loss if args.radiation_loss is not None else defaults["radiation_loss"])
-	vertical_air_transfer = bool(args.vertical_air_transfer if args.vertical_air_transfer is not None else defaults["vertical_air_transfer"])
-	vertical_air_attenuation = float(args.vertical_air_attenuation if args.vertical_air_attenuation is not None else defaults["vertical_air_attenuation"])
-	vertical_air_radius = float(args.vertical_air_radius if args.vertical_air_radius is not None else defaults["vertical_air_radius"])
-	vertical_air_random_delta = max(0.0, float(args.vertical_air_random_delta if args.vertical_air_random_delta is not None else defaults["vertical_air_random_delta"]))
 	t_amb = float(args.t_amb if args.t_amb is not None else defaults["t_amb"])
 	src_temp = float(args.src_temp if args.src_temp is not None else defaults["src_temp"])
 	src_x = float(args.src_x if args.src_x is not None else defaults["src_x"])
@@ -970,26 +782,11 @@ def run(args: argparse.Namespace):
 	print(f"Maillage charge: {len(pts)} noeuds, {len(elems)} elements ({dim}D).")
 
 	elem_tc = _element_tc_values(phys, phys_name_map)
+	elem_material_names = _initial_element_materials(phys, phys_name_map)
 	burned_elements = np.zeros(len(elems), dtype=bool)
-	burn_times = np.full(len(elems), np.inf, dtype=float)
 	t0 = time.perf_counter()
-	system = _assemble_elementwise_system(pts, elems, phys, phys_name_map, dim)
+	k_mat, m_mat, m_unit, q_node, tc_node = _assemble_system(pts, elems, phys, phys_name_map, dim, elem_material_names)
 	record_timing("system_assembly", time.perf_counter() - t0, details=f"nodes={len(pts)};elements={len(elems)};dim={dim}")
-	t0 = time.perf_counter()
-	vertical_transfer = _build_vertical_heat_transfer_field(
-		pts,
-		elems,
-		system.unit_load_local,
-		dim,
-		vertical_air_transfer,
-		vertical_air_attenuation,
-		vertical_air_radius,
-	)
-	record_timing(
-		"vertical_air_transfer_prepare",
-		time.perf_counter() - t0,
-		details=f"enabled={vertical_transfer.enabled};attenuation={vertical_air_attenuation};radius={vertical_air_radius}",
-	)
 
 	t0 = time.perf_counter()
 	t = np.full(len(pts), t_amb, dtype=float)
@@ -1003,11 +800,9 @@ def run(args: argparse.Namespace):
 		time.perf_counter() - t0,
 		details=f"src_x={src_x};src_y={src_y};src_z={src_z};src_radius={src_radius};src_temp={src_temp}",
 	)
-	initial_burned_indices = _update_burned_elements(burned_elements, elems, t, elem_tc)
-	if len(initial_burned_indices):
-		burn_times[initial_burned_indices] = 0.0
-		_apply_burn_deltas(system, elems, initial_burned_indices)
-		record_timing("element_burn_initial", 0.0, details=f"changed_elements={len(initial_burned_indices)}")
+	initial_burned_count = _update_burned_elements(burned_elements, elem_material_names, elems, t, elem_tc)
+	if initial_burned_count:
+		record_timing("element_burn_initial", 0.0, details=f"changed_elements={initial_burned_count}")
 
 	empty_dofs = np.array([], dtype=int)
 	empty_vals = np.array([], dtype=float)
@@ -1019,22 +814,23 @@ def run(args: argparse.Namespace):
 	else:
 		boundary_edges, boundary_edge_phys = _extract_boundary_edges(elems, phys)
 		bc_field = _build_boundary_condition_field(pts, boundary_edges, dim, h_conv, t_amb)
-	volume_loss = _build_volume_loss_field(system.m_unit, len(pts), general_loss, vent_loss, radiation_loss, t_amb)
-	k_eff = system.k_mat + bc_field.loss_matrix + volume_loss.loss_matrix
+	volume_loss = _build_volume_loss_field(m_unit, len(pts), general_loss, vent_loss, radiation_loss, t_amb)
+	k_eff = k_mat + bc_field.loss_matrix + volume_loss.loss_matrix
 
-	def apply_material_changes(burned_indices: np.ndarray) -> None:
-		nonlocal volume_loss, k_eff
-		if len(burned_indices) == 0:
-			return
-		t_update = time.perf_counter()
-		_apply_burn_deltas(system, elems, burned_indices)
-		volume_loss = _build_volume_loss_field(system.m_unit, len(pts), general_loss, vent_loss, radiation_loss, t_amb)
-		k_eff = system.k_mat + bc_field.loss_matrix + volume_loss.loss_matrix
+	def rebuild_system_after_material_change(changed_count: int) -> None:
+		nonlocal k_mat, m_mat, m_unit, q_node, tc_node, volume_loss, k_eff
+		t_rebuild = time.perf_counter()
+		k_mat, m_mat, m_unit, q_node, tc_node = _assemble_system(pts, elems, phys, phys_name_map, dim, elem_material_names)
+		volume_loss = _build_volume_loss_field(m_unit, len(pts), general_loss, vent_loss, radiation_loss, t_amb)
+		k_eff = k_mat + bc_field.loss_matrix + volume_loss.loss_matrix
 		record_timing(
-			"material_burn_delta_update",
-			time.perf_counter() - t_update,
-			details=f"changed_elements={len(burned_indices)}",
+			"material_burn_reassembly",
+			time.perf_counter() - t_rebuild,
+			details=f"changed_elements={changed_count}",
 		)
+
+	if initial_burned_count:
+		rebuild_system_after_material_change(initial_burned_count)
 
 	def _setup_axes(local_t: np.ndarray, title: str):
 		if dim == 2:
@@ -1075,20 +871,18 @@ def run(args: argparse.Namespace):
 			pts[:, 1],
 			pts[:, 2],
 			c=local_t,
-			cmap=THERMAL_CMAP_3D,
+			cmap=THERMAL_CMAP,
 			s=5,
-			vmin=THERMAL_3D_VMIN,
-			vmax=THERMAL_3D_VMAX,
+			vmin=t_amb,
+			vmax=max(1500.0, float(np.max(local_t))),
 			alpha=0.82,
 			depthshade=False,
 		)
 
 		_add_region_overlays_3d(ax_full, pts, boundary_faces, boundary_phys, visual_regions, include_solid_fill=False)
 		face_temps = np.mean(local_t[boundary_faces], axis=1)
-		norm = Normalize(vmin=THERMAL_3D_VMIN, vmax=THERMAL_3D_VMAX)
-		face_colors = THERMAL_CMAP_3D(norm(face_temps))
-		burned_boundary_mask = _burned_boundary_face_mask(boundary_faces, elems, burned_elements)
-		face_colors[burned_boundary_mask] = (0.0, 0.0, 0.0, 1.0)
+		norm = Normalize(vmin=t_amb, vmax=max(1500.0, float(np.max(local_t))))
+		face_colors = THERMAL_CMAP(norm(face_temps))
 		full_surface = Poly3DCollection(
 			[pts[face] for face in boundary_faces],
 			facecolors=face_colors,
@@ -1100,11 +894,11 @@ def run(args: argparse.Namespace):
 		region_fills = _add_region_overlays_3d(ax_full, pts, boundary_faces, boundary_phys, visual_regions, include_solid_fill=True)
 		region_edges = _add_region_edges_3d(ax_full, pts, boundary_faces, boundary_phys, visual_regions)
 		burned_tetra_surface = Poly3DCollection(
-			_burned_boundary_face_vertices(pts, boundary_faces, elems, burned_elements),
-			facecolors=(0.0, 0.0, 0.0, 1.0),
-			edgecolors=(0.0, 0.0, 0.0, 1.0),
+			_burned_tetra_face_vertices(pts, elems, burned_elements),
+			facecolors="black",
+			edgecolors="black",
 			linewidths=0.12,
-			alpha=0.9,
+			alpha=0.72,
 			zorder=9,
 		)
 		ax_full.add_collection3d(burned_tetra_surface)
@@ -1130,7 +924,7 @@ def run(args: argparse.Namespace):
 			_set_equal_3d_axes(local_ax, pts)
 		legend_handles = _build_region_legend_handles(visual_regions)
 		legend_handles.append(source_marker_full)
-		legend_handles.append(Patch(facecolor="black", edgecolor="black", alpha=0.9, label="Brule"))
+		legend_handles.append(Patch(facecolor="black", edgecolor="black", alpha=0.72, label="Brule"))
 		if legend_handles:
 			ax_full.legend(handles=legend_handles, loc="upper right", framealpha=0.9, title="Objets / Materiaux")
 		return fig, ax_full, {"mesh_scatter": mesh_scatter, "full_surface": full_surface, "mesh_ax": ax_mesh, "full_ax": ax_full, "region_fills": region_fills, "region_edges": region_edges, "burned_tetra_surface": burned_tetra_surface, "source_marker_mesh": source_marker_mesh, "source_marker_full": source_marker_full}
@@ -1177,7 +971,6 @@ def run(args: argparse.Namespace):
 	record_timing("animation_figure", time.perf_counter() - t0)
 	state = {"t": t, "time": 0.0}
 	ani = None
-	rng = np.random.default_rng()
 
 	def _update_visual(local_t: np.ndarray, sim_time: float):
 		if dim == 2:
@@ -1194,17 +987,11 @@ def run(args: argparse.Namespace):
 			mesh_ax = visuals["mesh_ax"]
 			full_ax = visuals["full_ax"]
 			mesh_scatter.set_array(local_t)
-			mesh_scatter.set_clim(vmin=THERMAL_3D_VMIN, vmax=THERMAL_3D_VMAX)
+			mesh_scatter.set_clim(vmin=t_amb, vmax=max(1500.0, float(np.max(local_t))))
 			face_temps = np.mean(local_t[boundary_faces], axis=1)
-			norm = Normalize(vmin=THERMAL_3D_VMIN, vmax=THERMAL_3D_VMAX)
-			face_colors = THERMAL_CMAP_3D(norm(face_temps))
-			burned_boundary_mask = _burned_boundary_face_mask(boundary_faces, elems, burned_elements)
-			face_colors[burned_boundary_mask] = (0.0, 0.0, 0.0, 1.0)
-			full_surface.set_facecolor(face_colors)
-			burned_tetra_surface.set_verts(_burned_boundary_face_vertices(pts, boundary_faces, elems, burned_elements))
-			burned_tetra_surface.set_facecolor((0.0, 0.0, 0.0, 1.0))
-			burned_tetra_surface.set_edgecolor((0.0, 0.0, 0.0, 1.0))
-			burned_tetra_surface.set_alpha(0.9)
+			norm = Normalize(vmin=t_amb, vmax=max(1500.0, float(np.max(local_t))))
+			full_surface.set_facecolor(THERMAL_CMAP(norm(face_temps)))
+			burned_tetra_surface.set_verts(_burned_tetra_face_vertices(pts, elems, burned_elements))
 			mesh_ax.set_title(f"Temps: {sim_time:.1f}s | Tmax: {np.max(local_t):.1f}K | Vue maillage")
 			full_ax.set_title(f"Temps: {sim_time:.1f}s | Tmax: {np.max(local_t):.1f}K | Vue pleine")
 			return [mesh_scatter, full_surface, burned_tetra_surface]
@@ -1214,34 +1001,28 @@ def run(args: argparse.Namespace):
 		sim_time = float(current_time)
 		t0 = time.perf_counter()
 		for _ in range(sub_steps):
-			vertical_attenuation_step = vertical_air_attenuation
-			if vertical_transfer.enabled and vertical_air_random_delta > 0.0:
-				vertical_attenuation_step = float(
-					vertical_air_attenuation
-					* rng.uniform(max(0.0, 1.0 - vertical_air_random_delta), 1.0 + vertical_air_random_delta)
-				)
-			src = _hrr_source_rhs(system, elems, burned_elements, t_local, burn_times, sim_time, vertical_transfer, vertical_attenuation_step)
-			radiation_loss_rhs = _radiation_loss_rhs(system.m_unit, t_local, volume_loss)
+			h_act = (t_local >= tc_node).astype(float)
+			src = m_unit.dot(q_node * h_act)
+			radiation_loss_rhs = _radiation_loss_rhs(m_unit, t_local, volume_loss)
 			rhs = src + bc_field.rhs + volume_loss.rhs - radiation_loss_rhs
 			t_local = np.asarray(
 				theta_step(
-					system.m_mat,
+					m_mat,
 					k_eff,
 					rhs,
 					rhs,
-			t_local,
-			dt=dt,
-			theta=theta,
+					t_local,
+					dt=dt,
+					theta=theta,
 					dirichlet_dofs=empty_dofs,
 					dir_vals_np1=empty_vals,
 				),
 				dtype=float,
 			)
-			burned_indices = _update_burned_elements(burned_elements, elems, t_local, elem_tc)
-			if len(burned_indices):
-				burn_times[burned_indices] = sim_time + dt
-				record_timing("element_burn_update", 0.0, details=f"changed_elements={len(burned_indices)}")
-				apply_material_changes(burned_indices)
+			changed_count = _update_burned_elements(burned_elements, elem_material_names, elems, t_local, elem_tc)
+			if changed_count:
+				record_timing("element_burn_update", 0.0, details=f"changed_elements={changed_count}")
+				rebuild_system_after_material_change(changed_count)
 			sim_time += dt
 		return t_local, sim_time, time.perf_counter() - t0
 
@@ -1309,10 +1090,6 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--general-loss", dest="general_loss", type=float, default=None, help="Perte volumique lineaire generale [W/m3/K]")
 	parser.add_argument("--vent-loss", dest="vent_loss", type=float, default=None, help="Perte volumique de ventilation [W/m3/K]")
 	parser.add_argument("--radiation-loss", dest="radiation_loss", type=float, default=None, help="Coefficient radiatif volumique [W/m3/K4]")
-	parser.add_argument("--vertical-air-transfer", dest="vertical_air_transfer", type=int, choices=[0, 1], default=None, help="Active le transfert vertical simplifie de HRR en 3D")
-	parser.add_argument("--vertical-air-attenuation", dest="vertical_air_attenuation", type=float, default=None, help="Attenuation verticale du transfert air [1/m]")
-	parser.add_argument("--vertical-air-radius", dest="vertical_air_radius", type=float, default=None, help="Rayon horizontal du transfert vertical; 0=auto")
-	parser.add_argument("--vertical-air-random-delta", dest="vertical_air_random_delta", type=float, default=None, help="Variation aleatoire de l'attenuation verticale a chaque sous-pas; 0=desactive")
 	parser.add_argument("--t-amb", dest="t_amb", type=float, default=None, help="Temperature ambiante")
 	parser.add_argument("--src-temp", dest="src_temp", type=float, default=None, help="Temperature initiale source")
 	parser.add_argument("--src-x", type=float, default=None, help="X source")

@@ -3,3 +3,5 @@ scipy
 matplotlib
 meshio
 gmsh
+https://fdstutorial.com/heat-release-rate-hrr-curve-calculation/
+https://www.sciencedirect.com/topics/engineering/heat-release-rate

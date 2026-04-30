@@ -6,11 +6,14 @@ Ce projet simule une diffusion thermique transitoire en 2D et 3D par éléments 
 
 - conduction dans des matériaux heterogenes,
 - convection vers une ambiance a température imposée,
+- pertes volumiques generales, ventilation et rayonnement,
 - source de combustion activee au-dessus d'une temperature seuil,
 - animation de la température dans le maillage,
 - export du setup initial, de l'animation et de timings CSV.
 
 Le point d'entrée principal est `main.py`.
+
+Une version experimentale orientee optimisation est disponible dans `main_elementwise.py`. Elle preassemble les contributions element par element et applique seulement les deltas normal -> brule quand un triangle/tetraedre bascule.
 
 La gestion 3D est deja prise en charge par `main.py` et les maillages du dossier `models/`. Les modules du dossier `calculs/` n'ont pas ete modifies, car ils supportent deja la 3D.
 
@@ -61,6 +64,13 @@ python main.py --3d
 
 En 3D, le maillage utilise par defaut `models/immeuble.msh` ; en 2D, `models/piece.msh` reste le choix par defaut.
 
+Tester la version element par element :
+
+```bash
+python main_elementwise.py
+python main_elementwise.py --3d
+```
+
 Test rapide :
 
 ```bash
@@ -105,7 +115,14 @@ run1/
 | `--steps` | int | `2000` | Nombre de frames / pas affiches |
 | `--sub-steps` | int | `1` | Sous-iterations de calcul par frame |
 | `--theta` | float | `1.0` | Schema theta, `1.0` = Euler implicite |
-| `--h-conv` | float | `1.0` | Coefficient de convection |
+| `--h-conv` | float | `10.0` | Coefficient de convection de frontiere [W/m2/K] |
+| `--general-loss` | float | `0.2` | Perte volumique lineaire generale [W/m3/K] |
+| `--vent-loss` | float | `1.0` | Perte volumique de ventilation [W/m3/K] |
+| `--radiation-loss` | float | `5.0e-8` | Coefficient radiatif volumique [W/m3/K4] |
+| `--vertical-air-transfer` | int | `1` en 3D | Active le transfert vertical simplifie de HRR |
+| `--vertical-air-attenuation` | float | `0.25` | Perte du transfert vertical par metre [1/m] |
+| `--vertical-air-radius` | float | `0.0` | Rayon horizontal du transfert vertical, `0=auto` |
+| `--vertical-air-random-delta` | float | `0.0` | Variation aleatoire de l'attenuation verticale a chaque sous-pas |
 | `--t-amb` | float | `293.0` | Temperature ambiante [K] |
 | `--src-temp` | float | `800.0` | Temperature initiale de la source [K] |
 | `--src-x` | float | `0.0` | Position X de la source |
@@ -126,12 +143,22 @@ Les materiaux sont definis dans `materialsbank.py`.
 | Isolation | 0.04 | 30.0 | 1400.0 | 42000 | 0.0 | 2000.0 | beige |
 | Air | 0.03 | 1.2 | 1000.0 | 1200 | 0.0 | 2000.0 | bleu tres pale |
 
+Les valeurs HRR actuelles sont des ordres de grandeur effectifs pour le modele volumique :
+
+- `bois` : `hrr = 8.0e6 W/m3`, `hrr_duration = 1800 s`,
+- `isolation` : `hrr = 3.0e6 W/m3`, `hrr_duration = 900 s`,
+- `beton`, `verre`, `air` : `hrr = 0`, non combustibles dans ce modele.
+
 Signification :
 
 - `k` : conductivite thermique,
 - `rho*c` : inertie thermique volumique,
 - `Q` : source de combustion locale,
 - `Tc` : seuil d'activation de la combustion.
+- `hrr` : heat release rate volumique maximal [W/m3].
+- `hrr_duration` : duree effective de degagement HRR [s].
+
+Chaque materiau possede aussi une variante `*_burn` dans la banque de donnees. Pendant la simulation, chaque element garde un etat `pas brule / brule` : en 2D chaque triangle qui depasse le `Tc` de son materiau devient noir ; en 3D chaque tetraedre qui depasse le `Tc` devient noir. Quand un element brule, son materiau courant passe en variante `*_burn`, les matrices thermiques prennent les caracteristiques cramees, et la chaleur degagee vient de la loi HRR du materiau.
 
 ## Theorie de diffusion utilisee
 
@@ -142,8 +169,15 @@ Le modele thermique exploite dans `main.py` correspond a une equation de diffusi
 ```math
 \rho c \frac{\partial T}{\partial t}
 - \nabla \cdot (k \nabla T)
-+ h (T - T_{amb})
++ a_v (T - T_{amb})
++ a_r (T^4 - T_{amb}^4)
 = q(x)\,H(T - T_c)
+```
+
+avec une condition de bord de type Robin :
+
+```math
+-k \nabla T \cdot n = h_b (T - T_{amb})
 ```
 
 avec :
@@ -152,7 +186,9 @@ avec :
 - `rho c` : capacite thermique volumique,
 - `k` : conductivite thermique,
 - `-div(k grad T)` : diffusion / conduction thermique,
-- `h (T - T_amb)` : echange convectif avec l'air ambiant,
+- `h_b (T - T_amb)` : echange convectif sur la frontiere,
+- `a_v (T - T_amb)` : pertes volumiques lineaires generales et ventilation,
+- `a_r (T^4 - T_amb^4)` : perte radiative volumique,
 - `q(x)` : intensite de la source de combustion,
 - `H(T - Tc)` : activation de type Heaviside, egale a `1` quand `T >= Tc`, sinon `0`.
 
@@ -161,8 +197,12 @@ avec :
 - `grad T` mesure la pente locale de temperature.
 - `k grad T` represente le flux thermique de conduction.
 - `div(k grad T)` mesure combien ce flux entre ou sort localement.
-- `h (T - T_amb)` refroidit le solide quand il est plus chaud que l'ambiance, et le rechauffe s'il est plus froid.
-- `q(x) H(T - Tc)` injecte de l'energie seulement si le seuil local de combustion est depasse.
+- `h_b (T - T_amb)` refroidit le solide par sa frontiere.
+- `a_v (T - T_amb)` simule les pertes reparties dans tout le volume.
+- `a_r (T^4 - T_amb^4)` devient dominant a haute temperature.
+- `HRR(x,t)` injecte l'energie degagee par les elements deja crames.
+- En 3D, le HRR peut aussi etre transporte vers les elements au-dessus avec un facteur simplifie `max(0, 1 - 0.25 dz)`.
+- `--vertical-air-random-delta d` multiplie l'attenuation verticale a chaque sous-pas par un facteur aleatoire dans `[1-d, 1+d]`.
 
 ## Equation FEM utilisee dans `main.py`
 
@@ -173,18 +213,18 @@ Le code resout a chaque pas :
 ```math
 M \frac{T^{n+1} - T^n}{\Delta t}
 +
-(K + h M_u) T^{n+1}
+(K + B + A_v M_u) T^{n+1}
 =
-S(T^n) + h M_u T_{amb}
+H_{RR}(T^n) + B T_{amb} + A_v M_u T_{amb} - R(T^n)
 ```
 
 Dans le code, cela correspond a :
 
 ```python
-k_eff = k_mat + h_conv * m_unit
-src = m_unit.dot(q_node * h_act)
-conv = h_conv * m_unit.dot(ones)
-rhs = src + conv
+k_eff = k_mat + bc_field.loss_matrix + volume_loss.loss_matrix
+src = _hrr_source_rhs(system, elems, burned_elements, t_local, burn_times, sim_time)
+radiation_loss_rhs = _radiation_loss_rhs(m_unit, t_local, volume_loss)
+rhs = src + bc_field.rhs + volume_loss.rhs - radiation_loss_rhs
 t = theta_step(m_mat, k_eff, rhs, rhs, t, dt=dt, theta=theta, ...)
 ```
 
@@ -195,23 +235,24 @@ t = theta_step(m_mat, k_eff, rhs, rhs, t, dt=dt, theta=theta, ...)
 - `m_mat` : matrice de masse thermique globale.
 - `k_mat` : matrice de conduction globale.
 - `m_unit` : matrice de masse unitaire, utilisee pour projeter les termes volumiques.
-- `h_conv` : coefficient de convection.
-- `ones = np.full(len(t), t_amb)` : vecteur contenant la temperature ambiante.
-- `q_node` : source locale de combustion par noeud.
-- `tc_node` : seuil local de combustion par noeud.
-- `h_act = (t >= tc_node).astype(float)` : active la combustion localement.
-- `src = m_unit.dot(q_node * h_act)` : second membre de combustion.
-- `conv = h_conv * m_unit.dot(ones)` : terme de convection vers l'ambiance.
-- `k_eff = k_mat + h_conv * m_unit` : operateur conduction + convection.
+- `bc_field` : champ de condition limite de frontiere.
+- `volume_loss` : pertes volumiques lineaires et radiatives.
+- `burned_elements` : flag d'etat crame par element.
+- `burn_times` : temps auquel chaque element est devenu crame.
+- `src = _hrr_source_rhs(...)` : second membre HRR assemble element par element.
+- `bc_field.rhs` : terme d'ambiance applique sur la frontiere.
+- `volume_loss.rhs` : terme d'ambiance applique dans le volume.
+- `radiation_loss_rhs` : perte radiative explicite calculee a partir de la temperature courante.
+- `k_eff` : operateur conduction + pertes lineaires.
 
 ### Forme implicite effectivement resolue
 
 Comme `theta = 1.0` par defaut, `theta_step(...)` applique Euler implicite :
 
 ```math
-\left(\frac{M}{\Delta t} + K + h M_u \right) T^{n+1}
+\left(\frac{M}{\Delta t} + K + B + A_v M_u \right) T^{n+1}
 =
-\frac{M}{\Delta t} T^n + S(T^n) + h M_u T_{amb}
+\frac{M}{\Delta t} T^n + H_{RR}(T^n) + B T_{amb} + A_v M_u T_{amb} - R(T^n)
 ```
 
 ## Assemblage FEM

@@ -9,6 +9,8 @@ MATERIALS = {
 		"c": 2000.0,
 		"Q": 1.8e7,
 		"Tc": 500.0,
+		"hrr": 8.0e6,
+		"hrr_duration": 1800.0,
 		"color": "#A66A3F",
 		"overlay_alpha_2d": 0.14,
 		"overlay_alpha_3d": 0.08,
@@ -20,6 +22,8 @@ MATERIALS = {
 		"c": 1000.0,
 		"Q": 1.2e7,
 		"Tc": 520.0,
+		"hrr": 0.0,
+		"hrr_duration": 0.0,
 		"color": "#8D939A",
 		"overlay_alpha_2d": 0.14,
 		"overlay_alpha_3d": 0.08,
@@ -31,6 +35,8 @@ MATERIALS = {
 		"c": 840.0,
 		"Q": 0.0,
 		"Tc": 2000.0,
+		"hrr": 0.0,
+		"hrr_duration": 0.0,
 		"color": "#5FACC5",
 		"overlay_alpha_2d": 0.10,
 		"overlay_alpha_3d": 0.06,
@@ -42,22 +48,64 @@ MATERIALS = {
 		"c": 1400.0,
 		"Q": 0.0,
 		"Tc": 2000.0,
+		"hrr": 3.0e6,
+		"hrr_duration": 900.0,
 		"color": "#E8DFA8",
 		"overlay_alpha_2d": 0.14,
 		"overlay_alpha_3d": 0.08,
 	},
 	"air": {
 		"name": "Air",
-		"k": 180.0,
+		"k": 0.5,#0.026,
 		"rho": 1.2,
 		"c": 1000.0,
 		"Q": 0.0,
-		"Tc": 2000.0,
+		"Tc": 10000.0,
+		"hrr": 0.0,
+		"hrr_duration": 0.0,
 		"color": "#D7EEF8",
 		"overlay_alpha_2d": 0.06,
 		"overlay_alpha_3d": 0.04,
 	},
 }
+
+
+def _make_burn_material(base_key: str, color: str):
+	base = MATERIALS[base_key]
+	return {
+		**base,
+		"name": f"{base['name']} brule",
+		"k": float(base["k"]) * 0.65,
+		"rho": float(base["rho"]) * 0.75,
+		"c": float(base["c"]),
+		"Q": 0.0,
+		"Tc": float("inf"),
+		"hrr": float(base["hrr"]),
+		"hrr_duration": float(base["hrr_duration"]),
+		"color": color,
+		"overlay_alpha_2d": min(0.28, float(base["overlay_alpha_2d"]) + 0.08),
+		"overlay_alpha_3d": min(0.18, float(base["overlay_alpha_3d"]) + 0.05),
+	}
+
+
+MATERIALS.update(
+	{
+		"bois_burn": _make_burn_material("bois", "#2B1B14"),
+		"beton_burn": _make_burn_material("beton", "#4D5053"),
+		"verre_burn": _make_burn_material("verre", "#2A5966"),
+		"isolation_burn": _make_burn_material("isolation", "#6F6949"),
+		"air_burn": _make_burn_material("air", "#8EA6AF"),
+	}
+)
+
+
+def get_burn_material_name(name: str) -> str:
+	"""Retourne la variante brulee du materiau si elle existe."""
+	key = str(name).strip().lower()
+	burn_key = key if key.endswith("_burn") else f"{key}_burn"
+	return burn_key if burn_key in MATERIALS else key
+
+
 def get_material(name: str):
 	"""Retourne le dictionnaire du materiau associe au nom donne."""
 	return MATERIALS.get(str(name).strip().lower(), MATERIALS["bois"])
