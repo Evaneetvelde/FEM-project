@@ -13,8 +13,8 @@ Rectangle(6) = {1.15, 1.02, 0, 0.18, 0.18};
 
 air[] = BooleanDifference{ Surface{1}; Delete; }{ Surface{2, 3, 4, 5, 6}; };
 
-Physical Surface(5) = {air[]};
-Physical Surface(1) = {2, 3, 4};
+Physical Surface(1) = {air[]};
+Physical Surface(2) = {2, 3, 4};
 Physical Surface(6) = {5};
 Physical Surface(7) = {6};
 

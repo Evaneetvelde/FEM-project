@@ -17,9 +17,8 @@ Disk(13) = {2.82, 1.02, 0, 0.11, 0.11};
 
 air[] = BooleanDifference{ Surface{1}; Delete; }{ Surface{2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}; };
 
-Physical Surface(5) = {air[]};
-Physical Surface(1) = {5, 6, 7, 8};
-Physical Surface(2) = {2, 3};
+Physical Surface(1) = {air[]};
+Physical Surface(2) = {5, 6, 7, 8};
 Physical Surface(6) = {9, 11};
 Physical Surface(7) = {10};
 Physical Surface(8) = {12, 13};

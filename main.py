@@ -1170,7 +1170,7 @@ def _add_source_marker_3d(ax, src_x: float, src_y: float, src_z: float):
 		linewidths=0.8,
 		depthshade=False,
 		zorder=8,
-		label="Source",
+		label="Source: "+str(src_temp)+" K",
 	)
 
 
@@ -1255,7 +1255,7 @@ def _scenario_defaults(dim: int) -> dict[str, float | int]:
 		"vertical_air_random_delta": 0.0,
 		"t_amb": 293.0,
 		"src_temp": 800.0,
-		"src_x": 0.0,
+		"src_x": 1.3,
 		"src_y": 0.0,
 		"src_z": 0.0,
 		"src_radius": 0.05,

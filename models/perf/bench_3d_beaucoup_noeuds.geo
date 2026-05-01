@@ -15,8 +15,8 @@ Box(7) = {0.8, 0.9, e, 0.55, 0.55, 0.55};
 Box(8) = {3.2, 2.4, e, 0.35, 0.35, 0.35};
 Box(9) = {1.6, 2.6, e, 0.45, 0.18, 0.18};
 
-Physical Volume(1) = {1};
-Physical Volume(2) = {2, 3, 4, 5, 6};
+Physical Volume(2) = {1};
+Physical Volume(1) = {2, 3, 4, 5, 6};
 Physical Volume(6) = {7};
 Physical Volume(7) = {8};
 Physical Volume(8) = {9};
