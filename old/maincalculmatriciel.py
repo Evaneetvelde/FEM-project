@@ -24,6 +24,8 @@ from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
 from scipy.sparse import csr_matrix, diags
 
 from calculs.dirichlet import precompute_dirichlet_dofs, theta_step_fast
+# Les kernels Numba sont utilises dans preassemble_* et assemble_*_from_preassembled.
+# On garde rows/cols/unit_data pour reassembler vite quand les coefficients changent.
 from calculs.mass import assemble_mass_from_preassembled, preassemble_mass_unit
 from calculs.stiffness import assemble_stiffness_from_preassembled, preassemble_stiffness_unit
 from materialsbank import get_burn_material_name, get_material, get_material_color, get_material_overlay_alpha

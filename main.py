@@ -4,7 +4,6 @@ import argparse
 import csv
 import sys
 import time
-from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +23,8 @@ from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
 from scipy.sparse import csr_matrix, diags
 
 from calculs.dirichlet import precompute_dirichlet_dofs, theta_step_fast
+# Les kernels Numba sont utilises dans preassemble_* et assemble_*_from_preassembled.
+# On garde rows/cols/unit_data pour reassembler vite quand les coefficients changent.
 from calculs.mass import assemble_mass_from_preassembled, preassemble_mass_unit
 from calculs.stiffness import assemble_stiffness_from_preassembled, preassemble_stiffness_unit
 from materialsbank import get_burn_material_name, get_material, get_material_color, get_material_overlay_alpha
@@ -1131,7 +1132,7 @@ def _build_boundary_edges(boundary_faces: np.ndarray) -> np.ndarray:
 	return np.asarray(sorted(edge_set), dtype=int)
 
 
-def _add_source_marker_2d(ax, src_x: float, src_y: float, src_radius: float):
+def _add_source_marker_2d(ax, src_x: float, src_y: float, src_radius: float, src_temp: float):
 	marker = ax.scatter(
 		[src_x],
 		[src_y],
@@ -1141,7 +1142,7 @@ def _add_source_marker_2d(ax, src_x: float, src_y: float, src_radius: float):
 		edgecolors="black",
 		linewidths=0.9,
 		zorder=8,
-		label="Source",
+		label="Source: "+str(src_temp)+" K",
 	)
 	if src_radius > 0.0:
 		ax.add_patch(
@@ -1158,7 +1159,7 @@ def _add_source_marker_2d(ax, src_x: float, src_y: float, src_radius: float):
 	return marker
 
 
-def _add_source_marker_3d(ax, src_x: float, src_y: float, src_z: float):
+def _add_source_marker_3d(ax, src_x: float, src_y: float, src_z: float, src_temp: float):
 	return ax.scatter(
 		[src_x],
 		[src_y],
@@ -1235,8 +1236,8 @@ def _scenario_defaults(dim: int) -> dict[str, float | int]:
 			"vertical_air_random_delta": 0.2,
 			"t_amb": 293.0,
 			"src_temp": 800.0,
-			"src_x": 2.0,
-			"src_y": 2.0,
+			"src_x": 0.0,
+			"src_y": 0.0,
 			"src_z": 0.5,
 			"src_radius": 1.0,
 		}
@@ -1431,7 +1432,7 @@ def run(args: argparse.Namespace):
 				zorder=9,
 			)
 			ax.add_collection(burned_collection)
-			source_marker = _add_source_marker_2d(ax, src_x, src_y, src_radius)
+			source_marker = _add_source_marker_2d(ax, src_x, src_y, src_radius, src_temp)
 			plt.colorbar(im, ax=ax, label="Temperature [K]")
 			ax.set_facecolor("#1A12BD")
 			ax.set_aspect("equal")
@@ -1491,8 +1492,8 @@ def run(args: argparse.Namespace):
 			zorder=9,
 		)
 		ax_full.add_collection3d(burned_tetra_surface)
-		source_marker_mesh = _add_source_marker_3d(ax_mesh, src_x, src_y, src_z)
-		source_marker_full = _add_source_marker_3d(ax_full, src_x, src_y, src_z)
+		source_marker_mesh = _add_source_marker_3d(ax_mesh, src_x, src_y, src_z, src_temp)
+		source_marker_full = _add_source_marker_3d(ax_full, src_x, src_y, src_z, src_temp)
 
 		fig.colorbar(
 			mesh_scatter,
