@@ -15,22 +15,33 @@ from matplotlib.collections import PolyCollection
 from matplotlib.colors import LinearSegmentedColormap, Normalize
 from matplotlib.patches import Circle, Patch
 from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
-from scipy.sparse import coo_matrix, csr_matrix, diags
+from scipy.sparse import csr_matrix, diags
 
 from calculs.dirichlet import theta_step
+from calculs.mass import assemble_mass
+from calculs.stiffness import assemble_stiffness_and_rhs
 from materialsbank import get_burn_material_name, get_material, get_material_color, get_material_overlay_alpha
 
 PHYSICAL_ID_MAP_2D = {
 	1: "bois",
 	2: "beton",
+	3: "verre",
+	4: "isolation",
 	5: "air",
-	11: "bois",
-	12: "air",
+	6: "metal",
+	7: "meche",
+	8: "explosif",
 }
 
 PHYSICAL_ID_MAP_3D = {
 	1: "bois",
 	2: "beton",
+	3: "verre",
+	4: "isolation",
+	5: "air",
+	6: "metal",
+	7: "meche",
+	8: "explosif",
 }
 
 ROLE_KEYWORDS = {
@@ -93,8 +104,12 @@ class ElementwiseSystem:
 	q_node: np.ndarray
 	tc_node: np.ndarray
 	elem_material_names: np.ndarray
-	delta_k_local: np.ndarray
-	delta_m_local: np.ndarray
+	w: np.ndarray
+	n_ref: np.ndarray
+	grad_ref: np.ndarray
+	jac: np.ndarray
+	det: np.ndarray
+	coords: np.ndarray
 
 
 @dataclass
@@ -294,8 +309,14 @@ def _node_reaction_fields(elems: np.ndarray, elem_material_names: np.ndarray, n_
 	return q_node, tc_node
 
 
-def _local_unit_matrices(points: np.ndarray, elems: np.ndarray, dim: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-	w, n_ref, grad_ref, jac, det, _coords = _build_p1_quadrature(points, elems, dim)
+def _local_unit_matrices_from_quadrature(
+	elems: np.ndarray,
+	w: np.ndarray,
+	n_ref: np.ndarray,
+	grad_ref: np.ndarray,
+	jac: np.ndarray,
+	det: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 	ne = len(elems)
 	nloc = elems.shape[1]
 	ngp = len(w)
@@ -317,18 +338,67 @@ def _local_unit_matrices(points: np.ndarray, elems: np.ndarray, dim: int) -> tup
 	return unit_mass, unit_stiffness, unit_load
 
 
-def _assemble_sparse_from_local(elems: np.ndarray, local_values: np.ndarray, n_nodes: int) -> csr_matrix:
-	nloc = elems.shape[1]
-	rows = np.repeat(elems, nloc, axis=1).reshape(-1)
-	cols = np.tile(elems, (1, nloc)).reshape(-1)
-	data = local_values.reshape(-1)
-	return coo_matrix((data, (rows, cols)), shape=(n_nodes, n_nodes)).tocsr()
+def _local_unit_matrices(points: np.ndarray, elems: np.ndarray, dim: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+	w, n_ref, grad_ref, jac, det, _coords = _build_p1_quadrature(points, elems, dim)
+	return _local_unit_matrices_from_quadrature(elems, w, n_ref, grad_ref, jac, det)
 
 
 def _assemble_vector_from_local(elems: np.ndarray, local_values: np.ndarray, n_nodes: int) -> np.ndarray:
 	values = np.zeros(n_nodes, dtype=float)
 	np.add.at(values, elems.reshape(-1), local_values.reshape(-1))
 	return values
+
+
+def _assemble_material_matrices(
+	elems: np.ndarray,
+	elem_material_names: np.ndarray,
+	w: np.ndarray,
+	n_ref: np.ndarray,
+	grad_ref: np.ndarray,
+	jac: np.ndarray,
+	det: np.ndarray,
+	coords: np.ndarray,
+	n_nodes: int,
+	use_burn_delta: bool = False,
+) -> tuple[csr_matrix, csr_matrix]:
+	tag_to_dof = np.arange(n_nodes, dtype=int)
+	k_mat = csr_matrix((n_nodes, n_nodes), dtype=float)
+	m_mat = csr_matrix((n_nodes, n_nodes), dtype=float)
+
+	for mat_name in sorted({str(name) for name in elem_material_names}):
+		mask = np.asarray(elem_material_names, dtype=object) == mat_name
+		if not np.any(mask):
+			continue
+		mat = get_material(mat_name)
+		if use_burn_delta:
+			burn_mat = get_material(get_burn_material_name(mat_name))
+			k_coeff = float(burn_mat["k"]) - float(mat["k"])
+			m_coeff = float(burn_mat["rho"]) * float(burn_mat["c"]) - float(mat["rho"]) * float(mat["c"])
+		else:
+			k_coeff = float(mat["k"])
+			m_coeff = float(mat["rho"]) * float(mat["c"])
+
+		elem_tags = np.flatnonzero(mask)
+		conn = elems[mask].reshape(-1)
+		if m_coeff != 0.0:
+			m_mat = m_mat + (m_coeff * assemble_mass(elem_tags, conn, det[mask], w, n_ref, tag_to_dof).tocsr())
+		if k_coeff != 0.0:
+			k_group, _rhs = assemble_stiffness_and_rhs(
+				elem_tags,
+				conn,
+				jac[mask],
+				det[mask],
+				coords[mask],
+				w,
+				n_ref,
+				grad_ref,
+				lambda _x, coeff=k_coeff: coeff,
+				lambda _x: 0.0,
+				tag_to_dof,
+			)
+			k_mat = k_mat + k_group.tocsr()
+
+	return k_mat, m_mat
 
 
 def _default_vertical_air_radius(points: np.ndarray, elems: np.ndarray) -> float:
@@ -378,29 +448,11 @@ def _assemble_elementwise_system(
 ) -> ElementwiseSystem:
 	n_nodes = points.shape[0]
 	elem_material_names = _initial_element_materials(phys_ids, phys_name_map)
-	unit_mass, unit_stiffness, unit_load = _local_unit_matrices(points, elems, dim)
+	w, n_ref, grad_ref, jac, det, coords = _build_p1_quadrature(points, elems, dim)
+	_unit_mass, _unit_stiffness, unit_load = _local_unit_matrices_from_quadrature(elems, w, n_ref, grad_ref, jac, det)
 
-	base_k_local = np.zeros_like(unit_stiffness)
-	base_m_local = np.zeros_like(unit_mass)
-	delta_k_local = np.zeros_like(unit_stiffness)
-	delta_m_local = np.zeros_like(unit_mass)
-
-	for e, mat_name in enumerate(elem_material_names):
-		mat = get_material(str(mat_name))
-		burn_mat = get_material(get_burn_material_name(str(mat_name)))
-		base_k = float(mat["k"])
-		base_pc = float(mat["rho"]) * float(mat["c"])
-		burn_k = float(burn_mat["k"])
-		burn_pc = float(burn_mat["rho"]) * float(burn_mat["c"])
-
-		base_k_local[e] = base_k * unit_stiffness[e]
-		base_m_local[e] = base_pc * unit_mass[e]
-		delta_k_local[e] = (burn_k - base_k) * unit_stiffness[e]
-		delta_m_local[e] = (burn_pc - base_pc) * unit_mass[e]
-
-	k_mat = _assemble_sparse_from_local(elems, base_k_local, n_nodes)
-	m_mat = _assemble_sparse_from_local(elems, base_m_local, n_nodes)
-	m_unit = _assemble_sparse_from_local(elems, unit_mass, n_nodes)
+	k_mat, m_mat = _assemble_material_matrices(elems, elem_material_names, w, n_ref, grad_ref, jac, det, coords, n_nodes)
+	m_unit = assemble_mass(np.arange(len(elems)), elems.reshape(-1), det, w, n_ref, np.arange(n_nodes, dtype=int)).tocsr()
 	q_node, tc_node = _node_reaction_fields(elems, elem_material_names, n_nodes)
 
 	return ElementwiseSystem(
@@ -411,8 +463,12 @@ def _assemble_elementwise_system(
 		q_node=q_node,
 		tc_node=tc_node,
 		elem_material_names=elem_material_names,
-		delta_k_local=delta_k_local,
-		delta_m_local=delta_m_local,
+		w=w,
+		n_ref=n_ref,
+		grad_ref=grad_ref,
+		jac=jac,
+		det=det,
+		coords=coords,
 	)
 
 
@@ -420,8 +476,20 @@ def _apply_burn_deltas(system: ElementwiseSystem, elems: np.ndarray, burned_indi
 	if len(burned_indices) == 0:
 		return
 	n_nodes = system.k_mat.shape[0]
-	system.k_mat = system.k_mat + _assemble_sparse_from_local(elems[burned_indices], system.delta_k_local[burned_indices], n_nodes)
-	system.m_mat = system.m_mat + _assemble_sparse_from_local(elems[burned_indices], system.delta_m_local[burned_indices], n_nodes)
+	delta_k, delta_m = _assemble_material_matrices(
+		elems[burned_indices],
+		system.elem_material_names[burned_indices],
+		system.w,
+		system.n_ref,
+		system.grad_ref,
+		system.jac[burned_indices],
+		system.det[burned_indices],
+		system.coords[burned_indices],
+		n_nodes,
+		use_burn_delta=True,
+	)
+	system.k_mat = system.k_mat + delta_k
+	system.m_mat = system.m_mat + delta_m
 	for elem_idx in burned_indices:
 		system.elem_material_names[int(elem_idx)] = get_burn_material_name(str(system.elem_material_names[int(elem_idx)]))
 	system.q_node, system.tc_node = _node_reaction_fields(elems, system.elem_material_names, n_nodes)
