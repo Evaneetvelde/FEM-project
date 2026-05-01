@@ -1579,6 +1579,11 @@ def run(args: argparse.Namespace):
 			if timings_csv_path is not None:
 				_write_timings_csv(timings_csv_path, timing_rows)
 
+	if getattr(args, "timings_csv", None):
+		timings_path = Path(args.timings_csv)
+		timings_path.parent.mkdir(parents=True, exist_ok=True)
+		_write_timings_csv(timings_path, timing_rows)
+
 	if args.plot:
 		plt.show()
 
@@ -1617,6 +1622,7 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--3d", dest="dim", action="store_const", const=3, help="Force le mode 3D")
 	parser.add_argument("--no-plot", dest="plot", action="store_false", help="Desactive l'affichage final")
 	parser.add_argument("--save", dest="save", type=str, default=None, help="Nom de fichier MP4 pour sauvegarder l'animation")
+	parser.add_argument("--timings-csv", dest="timings_csv", type=str, default=None, help="Chemin CSV pour sauvegarder les timings sans exporter d'animation")
 	parser.set_defaults(plot=True)
 	return parser
 

@@ -288,7 +288,7 @@ Pour le passage à l'état brulé, nous créons directement les matrices en deux
 
 ### Numba
 
-Numba utilisé dans l'assemblage des quadratures, matrice local unitaire, et les créations de matrices dans le module calcul
+Numba utilisé dans l'assemblage des quadratures, matrice local unitaire, et les créations de matrices dans le module calcul. L'utilisation de einsum n'a pas été retenue
 
 - Les quadratures P1 triangle et tetra sont compilees avec Numba.
 - Le calcul des matrices locales unitaires est compile avec Numba.

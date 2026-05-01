@@ -185,11 +185,23 @@ def _build_visual_regions(phys_ids: np.ndarray, phys_name_map: dict[int, str]) -
 	return regions
 
 
-def _load_mesh_data(mesh_path: Path, dim: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[int, str]]:
+def _load_mesh_data(mesh_path: Path, dim: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[int, str], int]:
 	msh = meshio.read(str(mesh_path))
 	cell_type = "triangle" if dim == 2 else "tetra"
-	pts = np.asarray(msh.points, dtype=float)[:, :dim]
 	elems = np.asarray(msh.cells_dict.get(cell_type, np.array([], dtype=int)), dtype=int)
+	
+	# Auto-detect dimension if requested cell type has no elements
+	if len(elems) == 0:
+		if dim == 2 and "tetra" in msh.cells_dict:
+			dim = 3
+			cell_type = "tetra"
+			elems = np.asarray(msh.cells_dict["tetra"], dtype=int)
+		elif dim == 3 and "triangle" in msh.cells_dict:
+			dim = 2
+			cell_type = "triangle"
+			elems = np.asarray(msh.cells_dict["triangle"], dtype=int)
+	
+	pts = np.asarray(msh.points, dtype=float)[:, :dim]
 	phys = np.asarray(
 		msh.cell_data_dict.get("gmsh:physical", {}).get(cell_type, np.ones(len(elems), dtype=int)),
 		dtype=int,
@@ -201,7 +213,7 @@ def _load_mesh_data(mesh_path: Path, dim: int) -> tuple[np.ndarray, np.ndarray, 
 	elems = inverse[elems]
 
 	phys_name_map = _physical_id_to_name_map(msh, dim)
-	return pts, elems, phys, phys_name_map
+	return pts, elems, phys, phys_name_map, dim
 
 
 @njit(cache=True)
@@ -1326,7 +1338,7 @@ def run(args: argparse.Namespace):
 	print(f"Using mesh: {mesh_path}")
 
 	t0 = time.perf_counter()
-	pts, elems, phys, phys_name_map = _load_mesh_data(mesh_path, dim)
+	pts, elems, phys, phys_name_map, dim = _load_mesh_data(mesh_path, dim)
 	record_timing("mesh_load", time.perf_counter() - t0, details=f"{mesh_path};dim={dim}")
 	print(f"Maillage charge: {len(pts)} noeuds, {len(elems)} elements ({dim}D).")
 
@@ -1747,6 +1759,11 @@ def run(args: argparse.Namespace):
 			if timings_csv_path is not None:
 				_write_timings_csv(timings_csv_path, timing_rows)
 
+	if getattr(args, "timings_csv", None):
+		timings_path = Path(args.timings_csv)
+		timings_path.parent.mkdir(parents=True, exist_ok=True)
+		_write_timings_csv(timings_path, timing_rows)
+
 	if args.plot:
 		plt.show()
 
@@ -1786,6 +1803,7 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--no-plot", dest="plot", action="store_false", help="Desactive l'affichage final")
 	parser.add_argument("--hide-burned-elements", dest="hide_burned_elements", action="store_true", help="Masque l'affichage noir des elements brules sans desactiver leur calcul")
 	parser.add_argument("--save", dest="save", type=str, default=None, help="Nom de fichier MP4 pour sauvegarder l'animation")
+	parser.add_argument("--timings-csv", dest="timings_csv", type=str, default=None, help="Chemin CSV pour sauvegarder les timings sans exporter d'animation")
 	parser.set_defaults(plot=True)
 	return parser
 
