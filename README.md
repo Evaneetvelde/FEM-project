@@ -1,307 +1,355 @@
-# Projet FEM - Diffusion Thermique 2D/3D
+# Projet FEM - diffusion-reaction thermique 2D/3D
 
-## Vue d'ensemble
+Ce projet simule la propagation de chaleur dans un domaine 2D ou 3D par elements finis. Il gere plusieurs materiaux, une source chaude initiale, l'allumage des elements combustibles, des pertes thermiques simplifiees, un transport vertical simplifie en 3D, et une visualisation animee.
 
-Ce projet simule une diffusion thermique transitoire en 2D et 3D par éléments finis, avec :
+Le point d'entree de reference est `main.py`. C'est la version optimisee actuelle.
 
-- conduction dans des matériaux heterogenes,
-- convection vers une ambiance a température imposée,
-- pertes volumiques generales, ventilation et rayonnement,
-- source de combustion activee au-dessus d'une temperature seuil,
-- animation de la température dans le maillage,
-- export du setup initial, de l'animation et de timings CSV.
+## Table des matieres
 
-Le point d'entrée principal est `main.py`.
+- [Arborescence du projet](#arborescence-du-projet)
+- [Installation](#installation)
+- [Utilisation rapide](#utilisation-rapide)
+- [Versions](#versions)
+- [Options](#options)
+- [Equation physique de notre modele](#equation-physique-de-notre-modele)
+- [Equation numerique de notre modele](#equation-numerique-de-notre-modele)
+- [Simplifications](#simplifications)
+- [Optimisations apportées](#optimisations-apportées)
+- [Ameliorations possibles](#ameliorations-possibles)
+- [Sources](#sources)
 
-Une version experimentale orientee optimisation est disponible dans `main_elementwise.py`. Elle preassemble les contributions element par element et applique seulement les deltas normal -> brule quand un triangle/tetraedre bascule.
-
-La gestion 3D est deja prise en charge par `main.py` et les maillages du dossier `models/`. Les modules du dossier `calculs/` n'ont pas ete modifies, car ils supportent deja la 3D.
-
-## Structure du projet
+## Arborescence du projet
 
 ```text
 FEM-project/
-|-- main.py
-|-- materialsbank.py
-|-- README.md
-|-- requirements.txt
+|-- main.py                           # version principale optimisee
+|-- materialsbank.py                  # banque des materiaux
+|-- requirements.txt                  # dependances Python
+|-- README.md                         # vous êtes ici
+|-- calculs/                          # provient du template du code founi dans le cours
+|   |-- dirichlet.py                  # schemas temporels et conditions Dirichlet
+|   |-- mass.py                       # assemblage masse
+|   `-- stiffness.py                  # assemblage raideur/conduction   
 |-- models/
 |   |-- piece.geo
 |   |-- piece.msh
 |   |-- immeuble.geo
-|   `-- immeuble.msh
-|-- calculs/
-|   |-- dirichlet.py
-|   |-- errors.py
-|   |-- gmsh_utils.py
-|   |-- mass.py
-|   |-- plot_utils.py
-|   `-- stiffness.py
-|-- old/
-`-- tracedesancienscodepourmesurerperf/
+|   |-- immeuble.msh
+|   |-- bois-air-bois.geo
+|   `-- bois-air-bois.msh
+`-- old/
+|   |-- mainnotopti.py                  # version de comparaison non optimisee
+|   |-- maincalculmatriciel.py          # etape calcul matriciel/preassemblage
+|   |-- mainfancyreassembling.py        # etape gel/degel et reassemblage selectif
+|   |-- main_notelementwise_notopti.py  # version antérieur sans burn 
+|   |-- diffusion_2D_fem.py             # prototype 2D
+|   `-- diffusion_3D_fem.py             # prototype 3d
+`-- perfs/
+    `-- perfs.py                      # script testant les performances temporels des différents main
 ```
 
 ## Installation
 
+Installer les dependances Python :
+
 ```bash
-pip install -r requirements.txt    
-ffmpeg -version                    #pour la sauvegarde d'animation
+pip install -r requirements.txt
+```
+
+Dependances principales :
+
+- `numpy`
+- `scipy`
+- `numba`
+- `matplotlib`
+- `meshio`
+- `gmsh`
+
+Pour exporter une animation MP4 avec `--save`, `ffmpeg` doit aussi etre disponible dans le `PATH` :
+
+```bash
+ffmpeg -version
 ```
 
 ## Utilisation rapide
 
-Lancement interactif :
+Lancer la simulation 2D par defaut :
 
 ```bash
 python main.py
 ```
 
-Forcer la version 3D :
+Lancer la simulation 3D :
 
 ```bash
 python main.py --3d
 ```
 
-En 3D, le maillage utilise par defaut `models/immeuble.msh` ; en 2D, `models/piece.msh` reste le choix par defaut.
-
-Tester la version element par element :
+Utiliser un maillage precis :
 
 ```bash
-python main_elementwise.py
-python main_elementwise.py --3d
+python main.py --mesh bois-air-bois.msh --2d
 ```
 
-Test rapide :
+## Versions
 
-```bash
-python main.py --steps 20 --sub-steps 1
-```
+| Fichier | Role |
+|---|---|
+| `main.py` | Version principale. |
+| `old/mainnotopti.py` | Version de comparaison non optimisee. Utile pour mesurer les gains. |
+| `old/maincalculmatriciel.py` | Ancienne version orientee calcul matriciel, preassemblage et Numba. |
+| `old/mainfancyreassembling.py` | Ancienne version orientee gel/degel et reassemblage selectif. |
+| `old/main_notelementwise_notopti.py` | Ancienne version sans mise a jour element par element. (non utilisé dans perf) |
+| `old/diffusion_2D_fem.py`, `old/diffusion_3D_fem.py` | Anciennes bases separees 2D/3D. |
 
-Export sans affichage interactif :
+## Options
 
-```bash
-python main.py --steps 20 --save run1.mp4 --no-plot
-```
+### Options principales
 
-Avec `--save`, le script cree un dossier de sortie contenant :
+| Option | Description |
+|---|---|
+| `--2d`, `--3d` | Force la dimension du calcul. |
+| `--mesh` | Nom ou chemin du maillage `.msh`. |
+| `--dt` | Pas de temps. |
+| `--steps` | Nombre de frames ou pas affiches. |
+| `--sub-steps` | Nombre de sous-pas de calcul par frame. |
+| `--theta` | Schema theta. `1.0` correspond a Euler implicite. |
+| `--h-conv` | Coefficient de convection sur la frontiere. |
+| `--general-loss` | Perte volumique lineaire generale. |
+| `--vent-loss` | Perte volumique de ventilation. |
+| `--radiation-loss` | Coefficient radiatif volumique. |
+| `--vertical-air-transfer` | Active le transfert vertical simplifie de HRR en 3D. |
+| `--vertical-air-attenuation` | Attenuation du transfert vertical avec la hauteur. |
+| `--vertical-air-radius` | Rayon horizontal du transfert vertical. `0` signifie automatique. |
+| `--vertical-air-random-delta` | Variation aleatoire de l'attenuation verticale. |
+| `--t-amb` | Temperature ambiante. |
+| `--src-temp` | Temperature initiale de la source. |
+| `--src-x`, `--src-y`, `--src-z` | Position de la source. |
+| `--src-radius` | Rayon initial de la source. |
+| `--no-plot` | Desactive l'affichage interactif. |
+| `--hide-burned-elements` | Masque la couche noire des elements brules sans changer le calcul. |
+| `--save` | Sauvegarde une animation MP4 et les timings. |
 
-- un PNG du setup initial,
-- l'animation exportee,
-- un `timings.csv`.
+### Options d'optimisation
 
-Si tu fais :
+| Option | Description |
+|---|---|
+| `--element-freeze-steps` | Nombre de steps froids avant de ne plus retester un element. `0` desactive. |
+| `--element-freeze-margin` | Marge sous `Tc` pour considerer un element froid/stable. |
+| `--node-freeze-steps` | Nombre de steps quasi stationnaires avant de geler temporairement un noeud. `0` desactive. |
+| `--node-freeze-delta` | Variation maximale de temperature par step pour geler un noeud. |
+| `--node-freeze-margin` | Marge sous `Tc` requise pour geler un noeud. |
+| `--node-thaw-delta` | Ecart de temperature avec un voisin declenchant le degel. |
+| `--node-thaw-margin` | Marge sous `Tc` d'un voisin declenchant le degel. |
+| `--max-frozen-node-fraction` | Fraction maximale de noeuds geles. |
 
-```bash
-python main.py --save run1.mp4 --no-plot
-```
-
-alors le dossier cree sera :
-
-```text
-run1/
-|-- run1.mp4
-|-- setup_initial.png
-`-- timings.csv
-```
-
-## Options CLI
-
-| Option | Type | Defaut | Description |
-|---|---|---:|---|
-| `--mesh` | str | `piece.msh` | Maillage dans `models/` |
-| `--2d` | flag | `False` | Force l'execution en 2D |
-| `--3d` | flag | `False` | Force l'execution en 3D |
-| `--dt` | float | `10.0` | Pas de temps |
-| `--steps` | int | `2000` | Nombre de frames / pas affiches |
-| `--sub-steps` | int | `1` | Sous-iterations de calcul par frame |
-| `--theta` | float | `1.0` | Schema theta, `1.0` = Euler implicite |
-| `--h-conv` | float | `10.0` | Coefficient de convection de frontiere [W/m2/K] |
-| `--general-loss` | float | `0.2` | Perte volumique lineaire generale [W/m3/K] |
-| `--vent-loss` | float | `1.0` | Perte volumique de ventilation [W/m3/K] |
-| `--radiation-loss` | float | `5.0e-8` | Coefficient radiatif volumique [W/m3/K4] |
-| `--vertical-air-transfer` | int | `1` en 3D | Active le transfert vertical simplifie de HRR |
-| `--vertical-air-attenuation` | float | `0.25` | Perte du transfert vertical par metre [1/m] |
-| `--vertical-air-radius` | float | `0.0` | Rayon horizontal du transfert vertical, `0=auto` |
-| `--vertical-air-random-delta` | float | `0.0` | Variation aleatoire de l'attenuation verticale a chaque sous-pas |
-| `--t-amb` | float | `293.0` | Temperature ambiante [K] |
-| `--src-temp` | float | `800.0` | Temperature initiale de la source [K] |
-| `--src-x` | float | `0.0` | Position X de la source |
-| `--src-y` | float | `0.0` | Position Y de la source |
-| `--src-radius` | float | `0.05` | Rayon de la source initiale |
-| `--save` | str | `None` | Nom du MP4 ou dossier de sortie |
-| `--no-plot` | flag | `False` | Desactive l'affichage interactif |
-
-## Materiaux
+### Materiaux et IDs physiques
 
 Les materiaux sont definis dans `materialsbank.py`.
 
-| Materiau | k [W/m.K] | rho [kg/m3] | c [J/kg.K] | rho*c [J/m3.K] | Q | Tc [K] | Couleur |
-|---|---:|---:|---:|---:|---:|---:|---|
-| Bois | 0.30 | 500.0 | 1500.0 | 750000 | 1.0e6 | 480.0 | brun |
-| Beton | 1.40 | 2400.0 | 880.0 | 2112000 | 0.0 | 2000.0 | gris |
-| Verre | 0.80 | 2500.0 | 840.0 | 2100000 | 0.0 | 2000.0 | bleu clair |
-| Isolation | 0.04 | 30.0 | 1400.0 | 42000 | 0.0 | 2000.0 | beige |
-| Air | 0.03 | 1.2 | 1000.0 | 1200 | 0.0 | 2000.0 | bleu tres pale |
+| ID | Materiau | Role typique |
+|---:|---|---|
+| 1 | `bois` | combustible solide |
+| 2 | `beton` | mur/structure |
+| 3 | `verre` | fenetre/non combustible |
+| 4 | `isolation` | isolant pouvant degager de la chaleur |
+| 5 | `air` | milieu de propagation thermique simplifie |
+| 6 | `metal` | elements metalliques, forte conduction |
+| 7 | `meche` | amorce combustible rapide |
+| 8 | `explosif` | degagement thermique tres court et intense |
 
-Les valeurs HRR actuelles sont des ordres de grandeur effectifs pour le modele volumique :
+Chaque materiau possede aussi une variante `*_burn`. Quand un element depasse son seuil `Tc`, il passe dans son etat brule : ses proprietes thermiques sont modifiees et son HRR suit la loi du materiau.
 
-- `bois` : `hrr = 8.0e6 W/m3`, `hrr_duration = 1800 s`,
-- `isolation` : `hrr = 3.0e6 W/m3`, `hrr_duration = 900 s`,
-- `beton`, `verre`, `air` : `hrr = 0`, non combustibles dans ce modele.
+## Equation physique de notre modele
 
-Signification :
-
-- `k` : conductivite thermique,
-- `rho*c` : inertie thermique volumique,
-- `Q` : source de combustion locale,
-- `Tc` : seuil d'activation de la combustion.
-- `hrr` : heat release rate volumique maximal [W/m3].
-- `hrr_duration` : duree effective de degagement HRR [s].
-
-Chaque materiau possede aussi une variante `*_burn` dans la banque de donnees. Pendant la simulation, chaque element garde un etat `pas brule / brule` : en 2D chaque triangle qui depasse le `Tc` de son materiau devient noir ; en 3D chaque tetraedre qui depasse le `Tc` devient noir. Quand un element brule, son materiau courant passe en variante `*_burn`, les matrices thermiques prennent les caracteristiques cramees, et la chaleur degagee vient de la loi HRR du materiau.
-
-## Theorie de diffusion utilisee
-
-### Equation continue
-
-Le modele thermique exploite dans `main.py` correspond a une equation de diffusion-reaction-convection de type :
+Le modele continu approxime est une equation de diffusion-reaction thermique avec pertes :
 
 ```math
 \rho c \frac{\partial T}{\partial t}
 - \nabla \cdot (k \nabla T)
 + a_v (T - T_{amb})
 + a_r (T^4 - T_{amb}^4)
-= q(x)\,H(T - T_c)
+= HRR(x,t)
 ```
 
-avec une condition de bord de type Robin :
+Sur la frontiere, on ajoute une condition de type convection :
 
 ```math
--k \nabla T \cdot n = h_b (T - T_{amb})
+-k \nabla T \cdot n = h (T - T_{amb})
 ```
 
-avec :
+Explication des termes :
 
-- `T(x,t)` : temperature,
-- `rho c` : capacite thermique volumique,
-- `k` : conductivite thermique,
-- `-div(k grad T)` : diffusion / conduction thermique,
-- `h_b (T - T_amb)` : echange convectif sur la frontiere,
-- `a_v (T - T_amb)` : pertes volumiques lineaires generales et ventilation,
-- `a_r (T^4 - T_amb^4)` : perte radiative volumique,
-- `q(x)` : intensite de la source de combustion,
-- `H(T - Tc)` : activation de type Heaviside, egale a `1` quand `T >= Tc`, sinon `0`.
+| Terme | Sens physique |
+|---|---|
+| `T(x,t)` | Temperature au point `x` et au temps `t`. |
+| `rho` | Masse volumique du materiau. |
+| `c` | Capacite thermique massique. |
+| `rho c dT/dt` | Inertie thermique : energie necessaire pour changer la temperature. |
+| `k` | Conductivite thermique du materiau. |
+| `grad T` | Direction et intensite locale de la variation de temperature. |
+| `-div(k grad T)` | Diffusion/conduction : transfert de chaleur dans le materiau. |
+| `a_v (T - T_amb)` | Pertes volumiques lineaires, incluant pertes generales et ventilation simplifiee. |
+| `a_r (T^4 - T_amb^4)` | Pertes radiatives simplifiees, importantes a haute temperature. |
+| `HRR(x,t)` | Puissance volumique liberee par les elements en combustion. |
+| `h (T - T_amb)` | Convection sur les bords du domaine. |
+| `n` | Normale sortante de la frontiere. |
+| `T_amb` | Temperature ambiante exterieure. |
 
-### Sens physique des termes
+L'allumage est gere par seuil : si la temperature moyenne d'un element depasse `Tc`, l'element devient brule et utilise la variante `*_burn` du materiau.
 
-- `grad T` mesure la pente locale de temperature.
-- `k grad T` represente le flux thermique de conduction.
-- `div(k grad T)` mesure combien ce flux entre ou sort localement.
-- `h_b (T - T_amb)` refroidit le solide par sa frontiere.
-- `a_v (T - T_amb)` simule les pertes reparties dans tout le volume.
-- `a_r (T^4 - T_amb^4)` devient dominant a haute temperature.
-- `HRR(x,t)` injecte l'energie degagee par les elements deja crames.
-- En 3D, le HRR peut aussi etre transporte vers les elements au-dessus avec un facteur simplifie `max(0, 1 - 0.25 dz)`.
-- `--vertical-air-random-delta d` multiplie l'attenuation verticale a chaque sous-pas par un facteur aleatoire dans `[1-d, 1+d]`.
+## Equation numerique de notre modele
 
-## Equation FEM utilisee dans `main.py`
-
-### Forme matricielle
-
-Le code resout a chaque pas :
+Apres discretisation, le probleme resolu a chaque pas est :
 
 ```math
 M \frac{T^{n+1} - T^n}{\Delta t}
-+
-(K + B + A_v M_u) T^{n+1}
-=
-H_{RR}(T^n) + B T_{amb} + A_v M_u T_{amb} - R(T^n)
++ (K + B + A_v M_u) T^{n+1}
+= HRR(T^n) + B T_{amb} + A_v M_u T_{amb} - R(T^n)
 ```
 
-Dans le code, cela correspond a :
+Avec le schema theta general, `theta=1` donne Euler implicite. C'est le reglage par defaut.
+
+Explication des termes numeriques :
+
+| Terme | Sens dans le code |
+|---|---|
+| `T^n` | Vecteur des temperatures nodales au temps courant. |
+| `T^{n+1}` | Vecteur des temperatures nodales apres le pas de temps. |
+| `Delta t` | Pas de temps `dt`. |
+| `M` | Matrice de masse thermique, assemblee avec `rho*c`. |
+| `K` | Matrice de raideur/conduction, assemblee avec `k`. |
+| `B` | Matrice diagonale de pertes de frontiere par convection. |
+| `M_u` | Matrice de masse unitaire, utilisee pour projeter les pertes et sources volumiques. |
+| `A_v M_u` | Contribution des pertes volumiques lineaires. |
+| `HRR(T^n)` | Source thermique explicite venant des elements deja allumes. |
+| `B T_amb` | Terme de retour vers la temperature ambiante sur la frontiere. |
+| `A_v M_u T_amb` | Terme de retour volumique vers la temperature ambiante. |
+| `R(T^n)` | Perte radiative explicite. |
+| `k_eff` | Dans le code : `K + B + A_v M_u`. |
+| `theta_step_fast` | Resolution du systeme lineaire pour avancer en temps. |
+
+Dans le code, le coeur du pas de temps est de la forme :
 
 ```python
-k_eff = k_mat + bc_field.loss_matrix + volume_loss.loss_matrix
-src = _hrr_source_rhs(system, elems, burned_elements, t_local, burn_times, sim_time)
-radiation_loss_rhs = _radiation_loss_rhs(m_unit, t_local, volume_loss)
+k_eff = system.k_mat + bc_field.loss_matrix + volume_loss.loss_matrix
+src = _hrr_source_rhs(...)
+radiation_loss_rhs = _radiation_loss_rhs(...)
 rhs = src + bc_field.rhs + volume_loss.rhs - radiation_loss_rhs
-t = theta_step(m_mat, k_eff, rhs, rhs, t, dt=dt, theta=theta, ...)
+t = theta_step_fast(system.m_mat, k_eff, rhs, rhs, t, dt=dt, theta=theta, ...)
 ```
 
-### Signification des objets du code
+## Simplifications
 
-- `t` : vecteur de temperatures nodales.
-- `dt` : pas de temps.
-- `m_mat` : matrice de masse thermique globale.
-- `k_mat` : matrice de conduction globale.
-- `m_unit` : matrice de masse unitaire, utilisee pour projeter les termes volumiques.
-- `bc_field` : champ de condition limite de frontiere.
-- `volume_loss` : pertes volumiques lineaires et radiatives.
-- `burned_elements` : flag d'etat crame par element.
-- `burn_times` : temps auquel chaque element est devenu crame.
-- `src = _hrr_source_rhs(...)` : second membre HRR assemble element par element.
-- `bc_field.rhs` : terme d'ambiance applique sur la frontiere.
-- `volume_loss.rhs` : terme d'ambiance applique dans le volume.
-- `radiation_loss_rhs` : perte radiative explicite calculee a partir de la temperature courante.
-- `k_eff` : operateur conduction + pertes lineaires.
+Le modele est volontairement simplifie pour rester calculable rapidement et lisible.
 
-### Forme implicite effectivement resolue
+### HRR et combustion
 
-Comme `theta = 1.0` par defaut, `theta_step(...)` applique Euler implicite :
+- Le feu n'est pas une reaction chimique complete.
+- Le HRR est une puissance volumique imposee par materiau.
+- L'allumage se fait par seuil `Tc` sur la temperature moyenne de l'element.
+- Les proprietes brulees sont approximees par une variante `*_burn`.
 
-```math
-\left(\frac{M}{\Delta t} + K + B + A_v M_u \right) T^{n+1}
-=
-\frac{M}{\Delta t} T^n + H_{RR}(T^n) + B T_{amb} + A_v M_u T_{amb} - R(T^n)
-```
+### Conditions aux frontieres
 
-## Assemblage FEM
+- Les bords utilisent une convection simplifiee vers `T_amb`.
+- Le coefficient `h_conv` est global.
+- Il n'y a pas de modele local de vent, de pression ou d'ouverture.
 
-Les matrices globales sont construites dans `_assemble_system()` en s'appuyant sur `calculs/` :
+### Pertes volumiques
 
-- `assemble_mass(...)` pour la masse,
-- `assemble_stiffness_and_rhs(...)` pour la raideur de conduction,
-- `theta_step(...)` pour l'avance temporelle.
+- `general_loss` et `vent_loss` sont des pertes lineaires reparties dans le volume.
+- Le rayonnement est traite comme une perte volumique explicite, pas comme un vrai echange radiatif surface-surface.
+- Les pertes radiatives sont limitees numeriquement pour eviter des valeurs extremes.
 
-Pipeline principal :
+### Air chaud et saut d'etage 3D
 
-1. lecture du maillage via `meshio`,
-2. recuperation des triangles et des IDs physiques,
-3. construction d'une quadrature P1 triangle,
-4. assemblage de `m_unit`,
-5. assemblage de `m_mat` par groupe de materiau via `rho * c`,
-6. assemblage de `k_mat` par groupe de materiau via `k`,
-7. calcul des vecteurs `q_node` et `tc_node`.
+- En 3D, le transfert vertical est une approximation : une partie du HRR peut chauffer les elements au-dessus.
+- Le facteur utilise est attenue avec la hauteur et un rayon horizontal.
 
-## Affichage et animation
+### Maillage et materiaux
 
-Le `main.py` :
+- Les materiaux sont constants par element.
+- Les contacts entre materiaux sont geres par le maillage, pas par une loi de contact detaillee.
+- Les noeuds doublons sont fusionnes par coordonnees arrondies pour reparer certains maillages non conformes.
 
-- affiche un setup initial,
-- colore legerement les zones de materiaux,
-- redessine les murs en beton de facon opaque par-dessus,
-- anime ensuite le champ de temperature.
+## Optimisations apportées
 
-Le temps affiche dans le titre correspond au temps simule cumule.
+### Précréation des matrices
 
-## Export et timings
+Pour le passage à l'état brulé, nous créons directement les matrices en deux états, non brulé et brulé, et nous prenons les données correspondant à l'état de l'élément au lieu de calculé à chaque reprise.
 
-Quand `--save` est utilise, le script exporte :
+### Elementwise
 
-- `setup_initial.png`,
-- l'animation MP4,
-- `timings.csv`.
+- Le code garde un etat par element : non brule ou brule.
+- Quand un element brule, on n'assemble pas tout depuis zero.
+- On applique seulement le delta de matrice entre le materiau normal et sa variante brulee.
+- Cela reduit fortement le cout quand peu d'elements changent a chaque pas.
 
-Le CSV contient notamment :
+### Numba
 
-- `mesh_load`,
-- `system_assembly`,
-- `initial_conditions`,
-- `initial_setup_figure`,
-- `initial_setup_png_save`,
-- `animation_figure`,
-- `animation_save`.
+Numba utilisé dans l'assemblage des quadratures, matrice local unitaire, et les créations de matrices dans le module calcul
 
-## Resultats 
-à observer nous même
+- Les quadratures P1 triangle et tetra sont compilees avec Numba.
+- Le calcul des matrices locales unitaires est compile avec Numba.
+- Les kernels evitent des boucles Python lentes et reduisent les allocations temporaires.
+- Les fonctions d'assemblage optimisees des modules `calculs/` utilisent aussi Numba.
 
+### Utilisation de kappa global par materiau
+
+- Les coefficients de conduction `k` et d'inertie `rho*c` sont convertis en tableaux par element.
+- Chaque element possede donc son coefficient effectif.
+- Ce choix permet d'assembler rapidement les contributions de tous les materiaux en une passe.
+- On raisonne par element car un meme maillage contient plusieurs materiaux, et un element peut changer de materiau lorsqu'il brule.
+
+### Gel/degel
+
+- Les elements froids et loin de leur seuil peuvent ne plus etre retestes a chaque pas.
+- Ils sont reactives automatiquement s'ils redeviennent proches d'une zone chaude.
+- Les noeuds quasi stationnaires peuvent etre temporairement geles par condition de Dirichlet.
+- Ils sont degeles si leurs voisins changent trop ou deviennent proches de l'allumage.
+- Cela reduit le nombre de degres de liberte actifs quand une grande partie du domaine ne bouge plus.
+
+## Ameliorations possibles
+
+### Solveurs et modèle
+
+Comme la diffusion est localisé à un domaine en bande correspondant au front de flamme, il est envisageable de construire un solveur qui ne calcule que ce domaine local, au lieu de geler les éléments non atteind par des changements de valeurs. Dans cette optique, ammener un système de résolution à notre modèle serait considérable: au centre de ce domaine, calculer les variations avec de petits pas de temps, et au bords, avec des pas de temps plus grand afin de ce concentrer uniquement sur le front de flamme.
+
+### Mecanique des fluides de l'air chaud
+
+Une amelioration physique serait d'inclure l'air chaud :
+
+- mouvement ascendant de l'air ;
+- panache thermique ;
+- appel d'air par les ouvertures ;
+- transport convectif horizontal et vertical ;
+- pression et debit entre pieces ou etages ;
+- couplage temperature/vitesse de l'air.
+
+Cela demanderait des equations de conservation de masse, quantite de mouvement et energie.
+
+### Frontieres plus realistes
+
+- Coefficients de convection differents selon les murs, fenetres, portes.
+- Ouvertures qui changent avec la temperature.
+- Echanges radiatifs entre surfaces.
+- Conditions exterieures dependantes du temps.
+
+### Combustion plus realiste
+
+- HRR dependant de l'oxygene disponible.
+- Propagation de flamme directionnelle.
+- Consommation de combustible.
+- Extinction possible.
+- Couplage avec fumee et gaz chauds.
+
+## sources
+
+le template du prof
+
+les différentes recherche sur la combustion
+
+le hrr
+
+un article sur les incendies ?

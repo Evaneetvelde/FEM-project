@@ -8,7 +8,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
 	sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -833,151 +833,11 @@ def _update_burned_elements(
 	elems: np.ndarray,
 	local_t: np.ndarray,
 	elem_tc: np.ndarray,
-	active_elements: np.ndarray | None = None,
 ) -> np.ndarray:
-	candidates = ~burned_elements
-	if active_elements is not None:
-		candidates &= active_elements
-	if not np.any(candidates):
-		return np.array([], dtype=int)
-
-	candidate_indices = np.flatnonzero(candidates)
-	elem_temperatures = np.mean(local_t[elems[candidate_indices]], axis=1)
-	newly_burned = candidate_indices[elem_temperatures >= elem_tc[candidate_indices]]
+	elem_temperatures = np.mean(local_t[elems], axis=1)
+	newly_burned = (~burned_elements) & (elem_temperatures >= elem_tc)
 	burned_elements[newly_burned] = True
-	return newly_burned
-
-
-def _update_element_activity(
-	active_elements: np.ndarray,
-	idle_steps: np.ndarray,
-	burned_elements: np.ndarray,
-	elems: np.ndarray,
-	local_t: np.ndarray,
-	elem_tc: np.ndarray,
-	freeze_steps: int,
-	temp_margin: float,
-) -> tuple[int, int]:
-	if freeze_steps <= 0:
-		active_elements[:] = True
-		idle_steps[:] = 0
-		return len(active_elements), 0
-
-	checkable = active_elements & (~burned_elements)
-	if not np.any(checkable):
-		return 0, int(np.count_nonzero(~active_elements))
-
-	check_indices = np.flatnonzero(checkable)
-	elem_temperatures = np.mean(local_t[elems[check_indices]], axis=1)
-	cold_stable = elem_temperatures < (elem_tc[check_indices] - float(temp_margin))
-	idle_steps[check_indices[cold_stable]] += 1
-	idle_steps[check_indices[~cold_stable]] = 0
-
-	to_freeze = check_indices[cold_stable & (idle_steps[check_indices] >= freeze_steps)]
-	active_elements[to_freeze] = False
-	return len(check_indices), int(len(to_freeze))
-
-
-def _reactivate_near_hot_nodes(
-	active_elements: np.ndarray,
-	idle_steps: np.ndarray,
-	burned_elements: np.ndarray,
-	elems: np.ndarray,
-	local_t: np.ndarray,
-	elem_tc: np.ndarray,
-	temp_margin: float,
-) -> int:
-	inactive = (~active_elements) & (~burned_elements)
-	if not np.any(inactive):
-		return 0
-
-	inactive_indices = np.flatnonzero(inactive)
-	max_node_t = np.max(local_t[elems[inactive_indices]], axis=1)
-	to_reactivate = inactive_indices[max_node_t >= (elem_tc[inactive_indices] - float(temp_margin))]
-	active_elements[to_reactivate] = True
-	idle_steps[to_reactivate] = 0
-	return int(len(to_reactivate))
-
-
-def _build_node_neighbors(elems: np.ndarray, n_nodes: int) -> list[np.ndarray]:
-	neighbors: list[set[int]] = [set() for _ in range(n_nodes)]
-	for element in elems:
-		nodes = [int(v) for v in element]
-		for node in nodes:
-			neighbors[node].update(other for other in nodes if other != node)
-	return [np.asarray(sorted(local_neighbors), dtype=int) for local_neighbors in neighbors]
-
-
-def _thaw_frozen_nodes(
-	frozen_nodes: np.ndarray,
-	node_idle_steps: np.ndarray,
-	node_neighbors: list[np.ndarray],
-	local_t: np.ndarray,
-	node_tc: np.ndarray,
-	thaw_delta: float,
-	thaw_tc_margin: float,
-) -> int:
-	frozen_indices = np.flatnonzero(frozen_nodes)
-	if len(frozen_indices) == 0:
-		return 0
-
-	to_thaw: list[int] = []
-	for node_idx in frozen_indices:
-		neighbors = node_neighbors[int(node_idx)]
-		if len(neighbors) == 0:
-			continue
-		neighbor_delta = float(np.max(np.abs(local_t[neighbors] - local_t[int(node_idx)])))
-		neighbor_hot = bool(np.any(local_t[neighbors] >= node_tc[neighbors] - float(thaw_tc_margin)))
-		if neighbor_delta >= thaw_delta or neighbor_hot:
-			to_thaw.append(int(node_idx))
-
-	if not to_thaw:
-		return 0
-	thaw_indices = np.asarray(to_thaw, dtype=int)
-	frozen_nodes[thaw_indices] = False
-	node_idle_steps[thaw_indices] = 0
-	return int(len(thaw_indices))
-
-
-def _update_frozen_nodes(
-	frozen_nodes: np.ndarray,
-	node_idle_steps: np.ndarray,
-	old_t: np.ndarray,
-	new_t: np.ndarray,
-	node_tc: np.ndarray,
-	freeze_steps: int,
-	freeze_delta: float,
-	freeze_tc_margin: float,
-	max_frozen_fraction: float,
-) -> tuple[int, int]:
-	if freeze_steps <= 0:
-		frozen_count = int(np.count_nonzero(frozen_nodes))
-		frozen_nodes[:] = False
-		node_idle_steps[:] = 0
-		return 0, -frozen_count
-
-	candidates = ~frozen_nodes
-	if not np.any(candidates):
-		return 0, 0
-
-	candidate_indices = np.flatnonzero(candidates)
-	stable = np.abs(new_t[candidate_indices] - old_t[candidate_indices]) <= float(freeze_delta)
-	cool = new_t[candidate_indices] < (node_tc[candidate_indices] - float(freeze_tc_margin))
-	steady = stable & cool
-	node_idle_steps[candidate_indices[steady]] += 1
-	node_idle_steps[candidate_indices[~steady]] = 0
-
-	to_freeze = candidate_indices[steady & (node_idle_steps[candidate_indices] >= freeze_steps)]
-	max_frozen = int(max(0.0, min(1.0, float(max_frozen_fraction))) * len(frozen_nodes))
-	available = max(0, max_frozen - int(np.count_nonzero(frozen_nodes)))
-	if available <= 0:
-		return len(candidate_indices), 0
-	if len(to_freeze) > available:
-		to_freeze = to_freeze[:available]
-
-	frozen_nodes[to_freeze] = True
-	node_idle_steps[to_freeze] = 0
-	return len(candidate_indices), int(len(to_freeze))
+	return np.flatnonzero(newly_burned)
 
 
 def _burned_triangle_vertices(points: np.ndarray, elems: np.ndarray, burned_elements: np.ndarray) -> list[np.ndarray]:
@@ -1296,15 +1156,6 @@ def run(args: argparse.Namespace):
 	src_y = float(args.src_y if args.src_y is not None else defaults["src_y"])
 	src_z = float(args.src_z if args.src_z is not None else defaults["src_z"])
 	src_radius = float(args.src_radius if args.src_radius is not None else defaults["src_radius"])
-	element_freeze_steps = max(0, int(args.element_freeze_steps))
-	element_freeze_margin = max(0.0, float(args.element_freeze_margin))
-	node_freeze_steps = max(0, int(args.node_freeze_steps))
-	node_freeze_delta = max(0.0, float(args.node_freeze_delta))
-	node_freeze_margin = max(0.0, float(args.node_freeze_margin))
-	node_thaw_delta = max(0.0, float(args.node_thaw_delta))
-	node_thaw_margin = max(0.0, float(args.node_thaw_margin))
-	max_frozen_node_fraction = max(0.0, min(0.98, float(args.max_frozen_node_fraction)))
-	show_burned_elements = not bool(args.hide_burned_elements)
 	timing_rows: list[dict[str, object]] = []
 
 	def record_timing(phase: str, seconds: float, frame: int | str = "", details: str = "") -> None:
@@ -1333,11 +1184,6 @@ def run(args: argparse.Namespace):
 	elem_tc = _element_tc_values(phys, phys_name_map)
 	burned_elements = np.zeros(len(elems), dtype=bool)
 	burn_times = np.full(len(elems), np.inf, dtype=float)
-	active_elements = np.ones(len(elems), dtype=bool)
-	element_idle_steps = np.zeros(len(elems), dtype=int)
-	frozen_nodes = np.zeros(len(pts), dtype=bool)
-	node_idle_steps = np.zeros(len(pts), dtype=int)
-	node_neighbors = _build_node_neighbors(elems, len(pts))
 	t0 = time.perf_counter()
 	system = _assemble_elementwise_system(pts, elems, phys, phys_name_map, dim)
 	record_timing("system_assembly", time.perf_counter() - t0, details=f"nodes={len(pts)};elements={len(elems)};dim={dim}")
@@ -1369,13 +1215,11 @@ def run(args: argparse.Namespace):
 		time.perf_counter() - t0,
 		details=f"src_x={src_x};src_y={src_y};src_z={src_z};src_radius={src_radius};src_temp={src_temp}",
 	)
-	initial_burned_indices = _update_burned_elements(burned_elements, elems, t, elem_tc, active_elements)
+	initial_burned_indices = _update_burned_elements(burned_elements, elems, t, elem_tc)
 	if len(initial_burned_indices):
 		burn_times[initial_burned_indices] = 0.0
 		_apply_burn_deltas(system, elems, initial_burned_indices)
 		record_timing("element_burn_initial", 0.0, details=f"changed_elements={len(initial_burned_indices)}")
-		active_elements[initial_burned_indices] = False
-		element_idle_steps[initial_burned_indices] = 0
 
 	empty_dofs = np.array([], dtype=int)
 	empty_vals = np.array([], dtype=float)
@@ -1411,11 +1255,11 @@ def run(args: argparse.Namespace):
 			im = ax.tripcolor(pts[:, 0], pts[:, 1], elems, local_t, cmap=THERMAL_CMAP, shading="gouraud", vmin=t_amb, vmax=1500, alpha=0.86)
 			_add_region_overlays_2d(ax, pts, elems, phys, visual_regions)
 			burned_collection = PolyCollection(
-				_burned_triangle_vertices(pts, elems, burned_elements) if show_burned_elements else [],
+				_burned_triangle_vertices(pts, elems, burned_elements),
 				facecolors="black",
 				edgecolors="black",
 				linewidths=0.45,
-				alpha=0.28 if show_burned_elements else 0.0,
+				alpha=0.28,
 				zorder=9,
 			)
 			ax.add_collection(burned_collection)
@@ -1426,8 +1270,7 @@ def run(args: argparse.Namespace):
 			ax.set_title(title)
 			legend_handles = _build_region_legend_handles(visual_regions)
 			legend_handles.append(source_marker)
-			if show_burned_elements:
-				legend_handles.append(Patch(facecolor="black", edgecolor="black", alpha=0.28, label="Brule"))
+			legend_handles.append(Patch(facecolor="black", edgecolor="black", alpha=0.28, label="Brule"))
 			if legend_handles:
 				ax.legend(handles=legend_handles, loc="upper right", framealpha=0.9, title="Objets / Materiaux")
 			return fig, ax, {"field": im, "burned_collection": burned_collection, "source_marker": source_marker}
@@ -1457,9 +1300,8 @@ def run(args: argparse.Namespace):
 		face_temps = np.mean(local_t[boundary_faces], axis=1)
 		norm = Normalize(vmin=THERMAL_3D_VMIN, vmax=THERMAL_3D_VMAX)
 		face_colors = THERMAL_CMAP_3D(norm(face_temps))
-		if show_burned_elements:
-			burned_boundary_mask = _burned_boundary_face_mask(boundary_faces, elems, burned_elements)
-			face_colors[burned_boundary_mask] = (0.0, 0.0, 0.0, 1.0)
+		burned_boundary_mask = _burned_boundary_face_mask(boundary_faces, elems, burned_elements)
+		face_colors[burned_boundary_mask] = (0.0, 0.0, 0.0, 1.0)
 		full_surface = Poly3DCollection(
 			[pts[face] for face in boundary_faces],
 			facecolors=face_colors,
@@ -1471,11 +1313,11 @@ def run(args: argparse.Namespace):
 		region_fills = _add_region_overlays_3d(ax_full, pts, boundary_faces, boundary_phys, visual_regions, include_solid_fill=True)
 		region_edges = _add_region_edges_3d(ax_full, pts, boundary_faces, boundary_phys, visual_regions)
 		burned_tetra_surface = Poly3DCollection(
-			_burned_boundary_face_vertices(pts, boundary_faces, elems, burned_elements) if show_burned_elements else [],
+			_burned_boundary_face_vertices(pts, boundary_faces, elems, burned_elements),
 			facecolors=(0.0, 0.0, 0.0, 1.0),
 			edgecolors=(0.0, 0.0, 0.0, 1.0),
 			linewidths=0.12,
-			alpha=0.9 if show_burned_elements else 0.0,
+			alpha=0.9,
 			zorder=9,
 		)
 		ax_full.add_collection3d(burned_tetra_surface)
@@ -1501,8 +1343,7 @@ def run(args: argparse.Namespace):
 			_set_equal_3d_axes(local_ax, pts)
 		legend_handles = _build_region_legend_handles(visual_regions)
 		legend_handles.append(source_marker_full)
-		if show_burned_elements:
-			legend_handles.append(Patch(facecolor="black", edgecolor="black", alpha=0.9, label="Brule"))
+		legend_handles.append(Patch(facecolor="black", edgecolor="black", alpha=0.9, label="Brule"))
 		if legend_handles:
 			ax_full.legend(handles=legend_handles, loc="upper right", framealpha=0.9, title="Objets / Materiaux")
 		return fig, ax_full, {"mesh_scatter": mesh_scatter, "full_surface": full_surface, "mesh_ax": ax_mesh, "full_ax": ax_full, "region_fills": region_fills, "region_edges": region_edges, "burned_tetra_surface": burned_tetra_surface, "source_marker_mesh": source_marker_mesh, "source_marker_full": source_marker_full}
@@ -1544,26 +1385,19 @@ def run(args: argparse.Namespace):
 		record_timing("initial_setup_png_save", time.perf_counter() - t1, details=str(setup_png_path))
 		plt.close(fig_init)
 
-	should_render = bool(args.plot or getattr(args, "save", None))
-	fig = ax = visuals = None
-	if should_render:
-		t0 = time.perf_counter()
-		fig, ax, visuals = _setup_axes(t, "Temps: 0.0s | Tmax: {:.1f}K".format(float(np.max(t))))
-		record_timing("animation_figure", time.perf_counter() - t0)
+	t0 = time.perf_counter()
+	fig, ax, visuals = _setup_axes(t, "Temps: 0.0s | Tmax: {:.1f}K".format(float(np.max(t))))
+	record_timing("animation_figure", time.perf_counter() - t0)
 	state = {"t": t, "time": 0.0}
 	ani = None
 	rng = np.random.default_rng()
-	cached_frozen_dofs = empty_dofs
-	cached_free_dofs = free_dofs
 
 	def _update_visual(local_t: np.ndarray, sim_time: float):
-		if visuals is None or ax is None:
-			return []
 		if dim == 2:
 			field = visuals["field"]
 			burned_collection = visuals["burned_collection"]
 			field.set_array(local_t)
-			burned_collection.set_verts(_burned_triangle_vertices(pts, elems, burned_elements) if show_burned_elements else [])
+			burned_collection.set_verts(_burned_triangle_vertices(pts, elems, burned_elements))
 			ax.set_title(f"Temps: {sim_time:.1f}s | Tmax: {np.max(local_t):.1f}K")
 			return [field, burned_collection]
 		else:
@@ -1577,34 +1411,22 @@ def run(args: argparse.Namespace):
 			face_temps = np.mean(local_t[boundary_faces], axis=1)
 			norm = Normalize(vmin=THERMAL_3D_VMIN, vmax=THERMAL_3D_VMAX)
 			face_colors = THERMAL_CMAP_3D(norm(face_temps))
-			if show_burned_elements:
-				burned_boundary_mask = _burned_boundary_face_mask(boundary_faces, elems, burned_elements)
-				face_colors[burned_boundary_mask] = (0.0, 0.0, 0.0, 1.0)
+			burned_boundary_mask = _burned_boundary_face_mask(boundary_faces, elems, burned_elements)
+			face_colors[burned_boundary_mask] = (0.0, 0.0, 0.0, 1.0)
 			full_surface.set_facecolor(face_colors)
-			burned_tetra_surface.set_verts(_burned_boundary_face_vertices(pts, boundary_faces, elems, burned_elements) if show_burned_elements else [])
+			burned_tetra_surface.set_verts(_burned_boundary_face_vertices(pts, boundary_faces, elems, burned_elements))
 			burned_tetra_surface.set_facecolor((0.0, 0.0, 0.0, 1.0))
 			burned_tetra_surface.set_edgecolor((0.0, 0.0, 0.0, 1.0))
-			burned_tetra_surface.set_alpha(0.9 if show_burned_elements else 0.0)
+			burned_tetra_surface.set_alpha(0.9)
 			mesh_ax.set_title(f"Temps: {sim_time:.1f}s | Tmax: {np.max(local_t):.1f}K | Vue maillage")
 			full_ax.set_title(f"Temps: {sim_time:.1f}s | Tmax: {np.max(local_t):.1f}K | Vue pleine")
 			return [mesh_scatter, full_surface, burned_tetra_surface]
 
 	def advance_state(current_t: np.ndarray, current_time: float) -> tuple[np.ndarray, float, float]:
-		nonlocal cached_frozen_dofs, cached_free_dofs
 		t_local = current_t
 		sim_time = float(current_time)
 		t0 = time.perf_counter()
 		for _ in range(sub_steps):
-			old_t = t_local.copy()
-			thawed_nodes = _thaw_frozen_nodes(
-				frozen_nodes,
-				node_idle_steps,
-				node_neighbors,
-				t_local,
-				system.tc_node,
-				node_thaw_delta,
-				node_thaw_margin,
-			)
 			vertical_attenuation_step = vertical_air_attenuation
 			if vertical_transfer.enabled and vertical_air_random_delta > 0.0:
 				vertical_attenuation_step = float(
@@ -1614,113 +1436,52 @@ def run(args: argparse.Namespace):
 			src = _hrr_source_rhs(system, elems, burned_elements, t_local, burn_times, sim_time, vertical_transfer, vertical_attenuation_step)
 			radiation_loss_rhs = _radiation_loss_rhs(system.m_unit, t_local, volume_loss)
 			rhs = src + bc_field.rhs + volume_loss.rhs - radiation_loss_rhs
-			frozen_dofs = np.flatnonzero(frozen_nodes)
-			frozen_vals = t_local[frozen_dofs]
-			if len(frozen_dofs) == 0:
-				step_free_dofs = free_dofs
-				cached_frozen_dofs = empty_dofs
-				cached_free_dofs = free_dofs
-			elif np.array_equal(frozen_dofs, cached_frozen_dofs):
-				step_free_dofs = cached_free_dofs
-			else:
-				cached_frozen_dofs = frozen_dofs.copy()
-				cached_free_dofs = precompute_dirichlet_dofs(len(pts), cached_frozen_dofs)
-				step_free_dofs = cached_free_dofs
 			t_local = np.asarray(
 				theta_step_fast(
 					system.m_mat,
 					k_eff,
 					rhs,
 					rhs,
-					t_local,
-					dt=dt,
-					theta=theta,
-					dirichlet_dofs=frozen_dofs if len(frozen_dofs) else empty_dofs,
-					dir_vals_np1=frozen_vals if len(frozen_dofs) else empty_vals,
-					free_dofs=step_free_dofs,
+			t_local,
+			dt=dt,
+			theta=theta,
+					dirichlet_dofs=empty_dofs,
+					dir_vals_np1=empty_vals,
+					free_dofs=free_dofs,
 				),
 				dtype=float,
 			)
-			checked_nodes, newly_frozen_nodes = _update_frozen_nodes(
-				frozen_nodes,
-				node_idle_steps,
-				old_t,
-				t_local,
-				system.tc_node,
-				node_freeze_steps,
-				node_freeze_delta,
-				node_freeze_margin,
-				max_frozen_node_fraction,
-			)
-			if newly_frozen_nodes or thawed_nodes:
-				record_timing(
-					"node_freeze_update",
-					0.0,
-					details=f"checked={checked_nodes};frozen={newly_frozen_nodes};thawed={thawed_nodes};frozen_total={int(np.count_nonzero(frozen_nodes))}",
-				)
-			reactivated_count = _reactivate_near_hot_nodes(
-				active_elements,
-				element_idle_steps,
-				burned_elements,
-				elems,
-				t_local,
-				elem_tc,
-				element_freeze_margin,
-			)
-			burned_indices = _update_burned_elements(burned_elements, elems, t_local, elem_tc, active_elements)
+			burned_indices = _update_burned_elements(burned_elements, elems, t_local, elem_tc)
 			if len(burned_indices):
 				burn_times[burned_indices] = sim_time + dt
 				record_timing("element_burn_update", 0.0, details=f"changed_elements={len(burned_indices)}")
 				apply_material_changes(burned_indices)
-				active_elements[burned_indices] = False
-				element_idle_steps[burned_indices] = 0
-			checked_count, frozen_count = _update_element_activity(
-				active_elements,
-				element_idle_steps,
-				burned_elements,
-				elems,
-				t_local,
-				elem_tc,
-				element_freeze_steps,
-				element_freeze_margin,
-			)
-			if frozen_count or reactivated_count:
-				record_timing(
-					"element_activity_update",
-					0.0,
-					details=f"checked={checked_count};frozen={frozen_count};reactivated={reactivated_count};active={int(np.count_nonzero(active_elements))}",
-				)
 			sim_time += dt
 		return t_local, sim_time, time.perf_counter() - t0
 
 	if not args.plot:
+		headless_frames = [t.copy()]
+		headless_times = [0.0]
+		headless_burned = [burned_elements.copy()]
 		t0 = time.perf_counter()
+		for frame_idx in range(steps):
+			t, sim_time, elapsed = advance_state(t, headless_times[-1])
+			record_timing("frame_calculation", elapsed, frame=frame_idx, details=f"sim_time={sim_time:.5f}")
+			headless_frames.append(t.copy())
+			headless_times.append(sim_time)
+			headless_burned.append(burned_elements.copy())
+		state["t"] = t
+		state["time"] = headless_times[-1]
+		record_timing("headless_calculation_total", time.perf_counter() - t0, details=f"frames={steps};dim={dim}")
+
+		def update_anim(frame_idx: int):
+			burned_elements[:] = headless_burned[frame_idx]
+			return _update_visual(headless_frames[frame_idx], headless_times[frame_idx])
+
 		if getattr(args, "save", None):
-			headless_frames = [t.copy()]
-			headless_times = [0.0]
-			headless_burned = [burned_elements.copy()]
-			for frame_idx in range(steps):
-				t, sim_time, elapsed = advance_state(t, headless_times[-1])
-				record_timing("frame_calculation", elapsed, frame=frame_idx, details=f"sim_time={sim_time:.5f}")
-				headless_frames.append(t.copy())
-				headless_times.append(sim_time)
-				headless_burned.append(burned_elements.copy())
-			state["t"] = t
-			state["time"] = headless_times[-1]
-
-			def update_anim(frame_idx: int):
-				burned_elements[:] = headless_burned[frame_idx]
-				return _update_visual(headless_frames[frame_idx], headless_times[frame_idx])
-
 			ani = FuncAnimation(fig, update_anim, frames=len(headless_frames), interval=100, blit=False, repeat=False)
 		else:
-			sim_time = 0.0
-			for frame_idx in range(steps):
-				t, sim_time, elapsed = advance_state(t, sim_time)
-				record_timing("frame_calculation", elapsed, frame=frame_idx, details=f"sim_time={sim_time:.5f}")
-			state["t"] = t
-			state["time"] = sim_time
-		record_timing("headless_calculation_total", time.perf_counter() - t0, details=f"frames={steps};dim={dim}")
+			plt.close(fig)
 	else:
 		def update_anim(frame_idx: int, local_state: dict[str, np.ndarray]):
 			t_local, sim_time, _elapsed = advance_state(local_state["t"], float(local_state["time"]))
@@ -1772,19 +1533,10 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--src-y", type=float, default=None, help="Y source")
 	parser.add_argument("--src-z", type=float, default=None, help="Z source (3D)")
 	parser.add_argument("--src-radius", type=float, default=None, help="Rayon source initial")
-	parser.add_argument("--element-freeze-steps", dest="element_freeze_steps", type=int, default=25, help="Nombre de steps froids avant de ne plus retester un element; 0=desactive")
-	parser.add_argument("--element-freeze-margin", dest="element_freeze_margin", type=float, default=25.0, help="Marge sous Tc pour considerer un element froid/stable [K]")
-	parser.add_argument("--node-freeze-steps", dest="node_freeze_steps", type=int, default=20, help="Nombre de steps quasi stationnaires avant Dirichlet temporaire; 0=desactive")
-	parser.add_argument("--node-freeze-delta", dest="node_freeze_delta", type=float, default=0.05, help="Variation max par step pour geler un noeud [K]")
-	parser.add_argument("--node-freeze-margin", dest="node_freeze_margin", type=float, default=50.0, help="Marge sous Tc requise pour geler un noeud [K]")
-	parser.add_argument("--node-thaw-delta", dest="node_thaw_delta", type=float, default=2.0, help="Ecart max avec un voisin avant degel [K]")
-	parser.add_argument("--node-thaw-margin", dest="node_thaw_margin", type=float, default=35.0, help="Marge sous Tc d'un voisin avant degel [K]")
-	parser.add_argument("--max-frozen-node-fraction", dest="max_frozen_node_fraction", type=float, default=0.90, help="Fraction maximale de noeuds geles")
 	parser.add_argument("--dim", type=int, choices=[2, 3], default=2, help="Dimension du calcul")
 	parser.add_argument("--2d", dest="dim", action="store_const", const=2, help="Force le mode 2D")
 	parser.add_argument("--3d", dest="dim", action="store_const", const=3, help="Force le mode 3D")
 	parser.add_argument("--no-plot", dest="plot", action="store_false", help="Desactive l'affichage final")
-	parser.add_argument("--hide-burned-elements", dest="hide_burned_elements", action="store_true", help="Masque l'affichage noir des elements brules sans desactiver leur calcul")
 	parser.add_argument("--save", dest="save", type=str, default=None, help="Nom de fichier MP4 pour sauvegarder l'animation")
 	parser.set_defaults(plot=True)
 	return parser

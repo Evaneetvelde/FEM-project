@@ -1,3 +1,4 @@
+#main gérant la simulation FEM diffusion-reaction 2D/3D
 from __future__ import annotations
 
 import argparse
@@ -8,14 +9,13 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
 	sys.path.insert(0, str(PROJECT_ROOT))
 
 import meshio
 import matplotlib.pyplot as plt
 import numpy as np
-from numba import njit
 from matplotlib.animation import FFMpegWriter, FuncAnimation
 from matplotlib.collections import PolyCollection
 from matplotlib.colors import LinearSegmentedColormap, Normalize
@@ -23,9 +23,9 @@ from matplotlib.patches import Circle, Patch
 from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
 from scipy.sparse import csr_matrix, diags
 
-from calculs.dirichlet import precompute_dirichlet_dofs, theta_step_fast
-from calculs.mass import assemble_mass_from_preassembled, preassemble_mass_unit
-from calculs.stiffness import assemble_stiffness_from_preassembled, preassemble_stiffness_unit
+from calculs.dirichlet import theta_step
+from calculs.mass import assemble_mass
+from calculs.stiffness import assemble_stiffness_and_rhs
 from materialsbank import get_burn_material_name, get_material, get_material_color, get_material_overlay_alpha
 
 PHYSICAL_ID_MAP_2D = {
@@ -116,16 +116,6 @@ class ElementwiseSystem:
 	jac: np.ndarray
 	det: np.ndarray
 	coords: np.ndarray
-	mass_rows: np.ndarray
-	mass_cols: np.ndarray
-	mass_unit_data: np.ndarray
-	mass_n_nodes: int
-	mass_nloc: int
-	stiffness_rows: np.ndarray
-	stiffness_cols: np.ndarray
-	stiffness_unit_data: np.ndarray
-	stiffness_n_nodes: int
-	stiffness_nloc: int
 
 
 @dataclass
@@ -204,89 +194,6 @@ def _load_mesh_data(mesh_path: Path, dim: int) -> tuple[np.ndarray, np.ndarray, 
 	return pts, elems, phys, phys_name_map
 
 
-@njit(cache=True)
-def _build_p1_triangle_quadrature_numba(points: np.ndarray, elems: np.ndarray, n_ref: np.ndarray):
-	ne = len(elems)
-	ngp = n_ref.shape[0]
-	jac = np.zeros((ne, ngp, 3, 3), dtype=np.float64)
-	det = np.zeros((ne, ngp), dtype=np.float64)
-	coords = np.zeros((ne, ngp, 3), dtype=np.float64)
-
-	for e in range(ne):
-		i0 = elems[e, 0]
-		i1 = elems[e, 1]
-		i2 = elems[e, 2]
-		p0x = points[i0, 0]
-		p0y = points[i0, 1]
-		p1x = points[i1, 0]
-		p1y = points[i1, 1]
-		p2x = points[i2, 0]
-		p2y = points[i2, 1]
-		j11 = p1x - p0x
-		j12 = p2x - p0x
-		j21 = p1y - p0y
-		j22 = p2y - p0y
-		det_j = abs(j11 * j22 - j12 * j21)
-
-		for g in range(ngp):
-			jac[e, g, 0, 0] = j11
-			jac[e, g, 0, 1] = j12
-			jac[e, g, 1, 0] = j21
-			jac[e, g, 1, 1] = j22
-			jac[e, g, 2, 2] = 1.0
-			det[e, g] = det_j
-			coords[e, g, 0] = n_ref[g, 0] * p0x + n_ref[g, 1] * p1x + n_ref[g, 2] * p2x
-			coords[e, g, 1] = n_ref[g, 0] * p0y + n_ref[g, 1] * p1y + n_ref[g, 2] * p2y
-
-	return jac, det, coords
-
-
-@njit(cache=True)
-def _det3(jac_e: np.ndarray) -> float:
-	return (
-		jac_e[0, 0] * (jac_e[1, 1] * jac_e[2, 2] - jac_e[1, 2] * jac_e[2, 1])
-		- jac_e[0, 1] * (jac_e[1, 0] * jac_e[2, 2] - jac_e[1, 2] * jac_e[2, 0])
-		+ jac_e[0, 2] * (jac_e[1, 0] * jac_e[2, 1] - jac_e[1, 1] * jac_e[2, 0])
-	)
-
-
-@njit(cache=True)
-def _build_p1_tetra_quadrature_numba(points: np.ndarray, elems: np.ndarray, bary: np.ndarray):
-	ne = len(elems)
-	ngp = bary.shape[0]
-	jac = np.zeros((ne, ngp, 3, 3), dtype=np.float64)
-	det = np.zeros((ne, ngp), dtype=np.float64)
-	coords = np.zeros((ne, ngp, 3), dtype=np.float64)
-
-	for e in range(ne):
-		i0 = elems[e, 0]
-		i1 = elems[e, 1]
-		i2 = elems[e, 2]
-		i3 = elems[e, 3]
-		jac_e = np.empty((3, 3), dtype=np.float64)
-		for d in range(3):
-			p0 = points[i0, d]
-			jac_e[d, 0] = points[i1, d] - p0
-			jac_e[d, 1] = points[i2, d] - p0
-			jac_e[d, 2] = points[i3, d] - p0
-		det_j = abs(_det3(jac_e))
-
-		for g in range(ngp):
-			for r in range(3):
-				for c in range(3):
-					jac[e, g, r, c] = jac_e[r, c]
-			det[e, g] = det_j
-			for d in range(3):
-				coords[e, g, d] = (
-					bary[g, 0] * points[i0, d]
-					+ bary[g, 1] * points[i1, d]
-					+ bary[g, 2] * points[i2, d]
-					+ bary[g, 3] * points[i3, d]
-				)
-
-	return jac, det, coords
-
-
 def _build_p1_triangle_quadrature(points: np.ndarray, elems: np.ndarray):
 	quad_ref = np.array(
 		[
@@ -314,12 +221,31 @@ def _build_p1_triangle_quadrature(points: np.ndarray, elems: np.ndarray):
 		dtype=float,
 	)
 
+	ne = len(elems)
 	ngp = len(w)
-	jac, det, coords = _build_p1_triangle_quadrature_numba(
-		np.asarray(points, dtype=np.float64),
-		np.asarray(elems, dtype=np.int64),
-		n_ref,
-	)
+	jac = np.zeros((ne, ngp, 3, 3), dtype=float)
+	det = np.zeros((ne, ngp), dtype=float)
+	coords = np.zeros((ne, ngp, 3), dtype=float)
+
+	for e, nodes in enumerate(elems):
+		p0, p1, p2 = points[nodes]
+		j11 = p1[0] - p0[0]
+		j12 = p2[0] - p0[0]
+		j21 = p1[1] - p0[1]
+		j22 = p2[1] - p0[1]
+		det_j = j11 * j22 - j12 * j21
+		jac_e = np.array(
+			[
+				[j11, j12, 0.0],
+				[j21, j22, 0.0],
+				[0.0, 0.0, 1.0],
+			],
+			dtype=float,
+		)
+		for g, (xi, eta) in enumerate(quad_ref):
+			jac[e, g] = jac_e
+			det[e, g] = abs(det_j)
+			coords[e, g, :2] = (1.0 - xi - eta) * p0 + xi * p1 + eta * p2
 
 	return w, n_ref, np.repeat(grad_ref[None, :, :], ngp, axis=0), jac, det, coords
 
@@ -348,12 +274,20 @@ def _build_p1_tetra_quadrature(points: np.ndarray, elems: np.ndarray):
 		dtype=float,
 	)
 
+	ne = len(elems)
 	ngp = len(w)
-	jac, det, coords = _build_p1_tetra_quadrature_numba(
-		np.asarray(points, dtype=np.float64),
-		np.asarray(elems, dtype=np.int64),
-		bary,
-	)
+	jac = np.zeros((ne, ngp, 3, 3), dtype=float)
+	det = np.zeros((ne, ngp), dtype=float)
+	coords = np.zeros((ne, ngp, 3), dtype=float)
+
+	for e, nodes in enumerate(elems):
+		p0, p1, p2, p3 = points[nodes]
+		jac_e = np.column_stack((p1 - p0, p2 - p0, p3 - p0))
+		det_j = float(np.linalg.det(jac_e))
+		for g, shape_vals in enumerate(bary):
+			jac[e, g] = jac_e
+			det[e, g] = abs(det_j)
+			coords[e, g] = shape_vals[0] * p0 + shape_vals[1] * p1 + shape_vals[2] * p2 + shape_vals[3] * p3
 
 	return w, n_ref, np.repeat(grad_ref[None, :, :], ngp, axis=0), jac, det, coords
 
@@ -381,72 +315,6 @@ def _node_reaction_fields(elems: np.ndarray, elem_material_names: np.ndarray, n_
 	return q_node, tc_node
 
 
-@njit(cache=True)
-def _local_unit_matrices_from_quadrature_numba(
-	elems: np.ndarray,
-	w: np.ndarray,
-	n_ref: np.ndarray,
-	grad_ref: np.ndarray,
-	jac: np.ndarray,
-	det: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-	ne = elems.shape[0]
-	nloc = elems.shape[1]
-	ngp = w.shape[0]
-	unit_mass = np.zeros((ne, nloc, nloc), dtype=np.float64)
-	unit_stiffness = np.zeros((ne, nloc, nloc), dtype=np.float64)
-	unit_load = np.zeros((ne, nloc), dtype=np.float64)
-	grads = np.zeros((nloc, 3), dtype=np.float64)
-
-	for e in range(ne):
-		for g in range(ngp):
-			j00 = jac[e, g, 0, 0]
-			j01 = jac[e, g, 0, 1]
-			j02 = jac[e, g, 0, 2]
-			j10 = jac[e, g, 1, 0]
-			j11 = jac[e, g, 1, 1]
-			j12 = jac[e, g, 1, 2]
-			j20 = jac[e, g, 2, 0]
-			j21 = jac[e, g, 2, 1]
-			j22 = jac[e, g, 2, 2]
-			det_j = (
-				j00 * (j11 * j22 - j12 * j21)
-				- j01 * (j10 * j22 - j12 * j20)
-				+ j02 * (j10 * j21 - j11 * j20)
-			)
-			inv_det = 1.0 / det_j
-			i00 = (j11 * j22 - j12 * j21) * inv_det
-			i01 = (j02 * j21 - j01 * j22) * inv_det
-			i02 = (j01 * j12 - j02 * j11) * inv_det
-			i10 = (j12 * j20 - j10 * j22) * inv_det
-			i11 = (j00 * j22 - j02 * j20) * inv_det
-			i12 = (j02 * j10 - j00 * j12) * inv_det
-			i20 = (j10 * j21 - j11 * j20) * inv_det
-			i21 = (j01 * j20 - j00 * j21) * inv_det
-			i22 = (j00 * j11 - j01 * j10) * inv_det
-
-			for a in range(nloc):
-				g0 = grad_ref[g, a, 0]
-				g1 = grad_ref[g, a, 1]
-				g2 = grad_ref[g, a, 2]
-				grads[a, 0] = i00 * g0 + i01 * g1 + i02 * g2
-				grads[a, 1] = i10 * g0 + i11 * g1 + i12 * g2
-				grads[a, 2] = i20 * g0 + i21 * g1 + i22 * g2
-
-			wg_det = w[g] * det[e, g]
-			for a in range(nloc):
-				unit_load[e, a] += wg_det * n_ref[g, a]
-				for b in range(nloc):
-					unit_mass[e, a, b] += wg_det * n_ref[g, a] * n_ref[g, b]
-					unit_stiffness[e, a, b] += wg_det * (
-						grads[a, 0] * grads[b, 0]
-						+ grads[a, 1] * grads[b, 1]
-						+ grads[a, 2] * grads[b, 2]
-					)
-
-	return unit_mass, unit_stiffness, unit_load
-
-
 def _local_unit_matrices_from_quadrature(
 	elems: np.ndarray,
 	w: np.ndarray,
@@ -455,23 +323,30 @@ def _local_unit_matrices_from_quadrature(
 	jac: np.ndarray,
 	det: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-	return _local_unit_matrices_from_quadrature_numba(
-		np.asarray(elems, dtype=np.int64),
-		np.asarray(w, dtype=np.float64),
-		np.asarray(n_ref, dtype=np.float64),
-		np.asarray(grad_ref, dtype=np.float64),
-		np.asarray(jac, dtype=np.float64),
-		np.asarray(det, dtype=np.float64),
-	)
+	ne = len(elems)
+	nloc = elems.shape[1]
+	ngp = len(w)
+	unit_mass = np.zeros((ne, nloc, nloc), dtype=float)
+	unit_stiffness = np.zeros((ne, nloc, nloc), dtype=float)
+	unit_load = np.zeros((ne, nloc), dtype=float)
+
+	for e in range(ne):
+		for g in range(ngp):
+			wg_det = float(w[g] * det[e, g])
+			inv_jac = np.linalg.inv(jac[e, g])
+			grads = np.array([inv_jac @ grad_ref[g, a] for a in range(nloc)], dtype=float)
+			for a in range(nloc):
+				unit_load[e, a] += wg_det * float(n_ref[g, a])
+				for b in range(nloc):
+					unit_mass[e, a, b] += wg_det * float(n_ref[g, a] * n_ref[g, b])
+					unit_stiffness[e, a, b] += wg_det * float(np.dot(grads[a], grads[b]))
+
+	return unit_mass, unit_stiffness, unit_load
 
 
 def _local_unit_matrices(points: np.ndarray, elems: np.ndarray, dim: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 	w, n_ref, grad_ref, jac, det, _coords = _build_p1_quadrature(points, elems, dim)
 	return _local_unit_matrices_from_quadrature(elems, w, n_ref, grad_ref, jac, det)
-
-
-def _unit_load_from_quadrature(w: np.ndarray, n_ref: np.ndarray, det: np.ndarray) -> np.ndarray:
-	return np.einsum("eg,g,ga->ea", det, w, n_ref, optimize=True)
 
 
 def _assemble_vector_from_local(elems: np.ndarray, local_values: np.ndarray, n_nodes: int) -> np.ndarray:
@@ -480,45 +355,55 @@ def _assemble_vector_from_local(elems: np.ndarray, local_values: np.ndarray, n_n
 	return values
 
 
-def _material_coefficients(
+def _assemble_material_matrices(
+	elems: np.ndarray,
 	elem_material_names: np.ndarray,
+	w: np.ndarray,
+	n_ref: np.ndarray,
+	grad_ref: np.ndarray,
+	jac: np.ndarray,
+	det: np.ndarray,
+	coords: np.ndarray,
+	n_nodes: int,
 	use_burn_delta: bool = False,
-) -> tuple[np.ndarray, np.ndarray]:
-	k_coeffs = np.zeros(len(elem_material_names), dtype=float)
-	m_coeffs = np.zeros(len(elem_material_names), dtype=float)
-	for idx, mat_name in enumerate(elem_material_names):
+) -> tuple[csr_matrix, csr_matrix]:
+	tag_to_dof = np.arange(n_nodes, dtype=int)
+	k_mat = csr_matrix((n_nodes, n_nodes), dtype=float)
+	m_mat = csr_matrix((n_nodes, n_nodes), dtype=float)
+
+	for mat_name in sorted({str(name) for name in elem_material_names}):
+		mask = np.asarray(elem_material_names, dtype=object) == mat_name
+		if not np.any(mask):
+			continue
 		mat = get_material(mat_name)
 		if use_burn_delta:
 			burn_mat = get_material(get_burn_material_name(mat_name))
-			k_coeffs[idx] = float(burn_mat["k"]) - float(mat["k"])
-			m_coeffs[idx] = float(burn_mat["rho"]) * float(burn_mat["c"]) - float(mat["rho"]) * float(mat["c"])
+			k_coeff = float(burn_mat["k"]) - float(mat["k"])
+			m_coeff = float(burn_mat["rho"]) * float(burn_mat["c"]) - float(mat["rho"]) * float(mat["c"])
 		else:
-			k_coeffs[idx] = float(mat["k"])
-			m_coeffs[idx] = float(mat["rho"]) * float(mat["c"])
-	return k_coeffs, m_coeffs
+			k_coeff = float(mat["k"])
+			m_coeff = float(mat["rho"]) * float(mat["c"])
 
+		elem_tags = np.flatnonzero(mask)
+		conn = elems[mask].reshape(-1)
+		if m_coeff != 0.0:
+			m_mat = m_mat + (m_coeff * assemble_mass(elem_tags, conn, det[mask], w, n_ref, tag_to_dof).tocsr())
+		if k_coeff != 0.0:
+			k_group, _rhs = assemble_stiffness_and_rhs(
+				elem_tags,
+				conn,
+				jac[mask],
+				det[mask],
+				coords[mask],
+				w,
+				n_ref,
+				grad_ref,
+				lambda _x, coeff=k_coeff: coeff,
+				lambda _x: 0.0,
+				tag_to_dof,
+			)
+			k_mat = k_mat + k_group.tocsr()
 
-def _assemble_material_matrices_from_preassembled(
-	system: ElementwiseSystem,
-	k_coeffs: np.ndarray,
-	m_coeffs: np.ndarray,
-) -> tuple[csr_matrix, csr_matrix]:
-	k_mat = assemble_stiffness_from_preassembled(
-		system.stiffness_rows,
-		system.stiffness_cols,
-		system.stiffness_unit_data,
-		system.stiffness_n_nodes,
-		system.stiffness_nloc,
-		k_coeffs,
-	)
-	m_mat = assemble_mass_from_preassembled(
-		system.mass_rows,
-		system.mass_cols,
-		system.mass_unit_data,
-		system.mass_n_nodes,
-		system.mass_nloc,
-		m_coeffs,
-	)
 	return k_mat, m_mat
 
 
@@ -570,27 +455,10 @@ def _assemble_elementwise_system(
 	n_nodes = points.shape[0]
 	elem_material_names = _initial_element_materials(phys_ids, phys_name_map)
 	w, n_ref, grad_ref, jac, det, coords = _build_p1_quadrature(points, elems, dim)
-	unit_load = _unit_load_from_quadrature(w, n_ref, det)
-	tag_to_dof = np.arange(n_nodes, dtype=int)
-	mass_rows, mass_cols, mass_unit_data, mass_n_nodes, mass_nloc = preassemble_mass_unit(
-		elems.reshape(-1),
-		det,
-		w,
-		n_ref,
-		tag_to_dof,
-	)
-	stiffness_rows, stiffness_cols, stiffness_unit_data, stiffness_n_nodes, stiffness_nloc = preassemble_stiffness_unit(
-		elems.reshape(-1),
-		jac,
-		det,
-		w,
-		grad_ref,
-		tag_to_dof,
-	)
-	k_coeffs, m_coeffs = _material_coefficients(elem_material_names)
-	k_mat = assemble_stiffness_from_preassembled(stiffness_rows, stiffness_cols, stiffness_unit_data, stiffness_n_nodes, stiffness_nloc, k_coeffs)
-	m_mat = assemble_mass_from_preassembled(mass_rows, mass_cols, mass_unit_data, mass_n_nodes, mass_nloc, m_coeffs)
-	m_unit = assemble_mass_from_preassembled(mass_rows, mass_cols, mass_unit_data, mass_n_nodes, mass_nloc)
+	_unit_mass, _unit_stiffness, unit_load = _local_unit_matrices_from_quadrature(elems, w, n_ref, grad_ref, jac, det)
+
+	k_mat, m_mat = _assemble_material_matrices(elems, elem_material_names, w, n_ref, grad_ref, jac, det, coords, n_nodes)
+	m_unit = assemble_mass(np.arange(len(elems)), elems.reshape(-1), det, w, n_ref, np.arange(n_nodes, dtype=int)).tocsr()
 	q_node, tc_node = _node_reaction_fields(elems, elem_material_names, n_nodes)
 
 	return ElementwiseSystem(
@@ -607,16 +475,6 @@ def _assemble_elementwise_system(
 		jac=jac,
 		det=det,
 		coords=coords,
-		mass_rows=mass_rows,
-		mass_cols=mass_cols,
-		mass_unit_data=mass_unit_data,
-		mass_n_nodes=mass_n_nodes,
-		mass_nloc=mass_nloc,
-		stiffness_rows=stiffness_rows,
-		stiffness_cols=stiffness_cols,
-		stiffness_unit_data=stiffness_unit_data,
-		stiffness_n_nodes=stiffness_n_nodes,
-		stiffness_nloc=stiffness_nloc,
 	)
 
 
@@ -624,14 +482,18 @@ def _apply_burn_deltas(system: ElementwiseSystem, elems: np.ndarray, burned_indi
 	if len(burned_indices) == 0:
 		return
 	n_nodes = system.k_mat.shape[0]
-	local_delta_k, local_delta_m = _material_coefficients(system.elem_material_names[burned_indices], use_burn_delta=True)
-	delta_k_coeffs = np.zeros(len(elems), dtype=float)
-	delta_m_coeffs = np.zeros(len(elems), dtype=float)
-	delta_k_coeffs[burned_indices] = local_delta_k
-	delta_m_coeffs[burned_indices] = local_delta_m
-	delta_k, delta_m = _assemble_material_matrices_from_preassembled(system, delta_k_coeffs, delta_m_coeffs)
-	delta_k.eliminate_zeros()
-	delta_m.eliminate_zeros()
+	delta_k, delta_m = _assemble_material_matrices(
+		elems[burned_indices],
+		system.elem_material_names[burned_indices],
+		system.w,
+		system.n_ref,
+		system.grad_ref,
+		system.jac[burned_indices],
+		system.det[burned_indices],
+		system.coords[burned_indices],
+		n_nodes,
+		use_burn_delta=True,
+	)
 	system.k_mat = system.k_mat + delta_k
 	system.m_mat = system.m_mat + delta_m
 	for elem_idx in burned_indices:
@@ -1304,7 +1166,6 @@ def run(args: argparse.Namespace):
 	node_thaw_delta = max(0.0, float(args.node_thaw_delta))
 	node_thaw_margin = max(0.0, float(args.node_thaw_margin))
 	max_frozen_node_fraction = max(0.0, min(0.98, float(args.max_frozen_node_fraction)))
-	show_burned_elements = not bool(args.hide_burned_elements)
 	timing_rows: list[dict[str, object]] = []
 
 	def record_timing(phase: str, seconds: float, frame: int | str = "", details: str = "") -> None:
@@ -1379,7 +1240,6 @@ def run(args: argparse.Namespace):
 
 	empty_dofs = np.array([], dtype=int)
 	empty_vals = np.array([], dtype=float)
-	free_dofs = precompute_dirichlet_dofs(len(pts), empty_dofs)
 	boundary_faces = boundary_phys = boundary_edges = boundary_edge_phys = None
 	visual_regions = _build_visual_regions(phys, phys_name_map)
 	if dim == 3:
@@ -1411,11 +1271,11 @@ def run(args: argparse.Namespace):
 			im = ax.tripcolor(pts[:, 0], pts[:, 1], elems, local_t, cmap=THERMAL_CMAP, shading="gouraud", vmin=t_amb, vmax=1500, alpha=0.86)
 			_add_region_overlays_2d(ax, pts, elems, phys, visual_regions)
 			burned_collection = PolyCollection(
-				_burned_triangle_vertices(pts, elems, burned_elements) if show_burned_elements else [],
+				_burned_triangle_vertices(pts, elems, burned_elements),
 				facecolors="black",
 				edgecolors="black",
 				linewidths=0.45,
-				alpha=0.28 if show_burned_elements else 0.0,
+				alpha=0.28,
 				zorder=9,
 			)
 			ax.add_collection(burned_collection)
@@ -1426,8 +1286,7 @@ def run(args: argparse.Namespace):
 			ax.set_title(title)
 			legend_handles = _build_region_legend_handles(visual_regions)
 			legend_handles.append(source_marker)
-			if show_burned_elements:
-				legend_handles.append(Patch(facecolor="black", edgecolor="black", alpha=0.28, label="Brule"))
+			legend_handles.append(Patch(facecolor="black", edgecolor="black", alpha=0.28, label="Brule"))
 			if legend_handles:
 				ax.legend(handles=legend_handles, loc="upper right", framealpha=0.9, title="Objets / Materiaux")
 			return fig, ax, {"field": im, "burned_collection": burned_collection, "source_marker": source_marker}
@@ -1457,9 +1316,8 @@ def run(args: argparse.Namespace):
 		face_temps = np.mean(local_t[boundary_faces], axis=1)
 		norm = Normalize(vmin=THERMAL_3D_VMIN, vmax=THERMAL_3D_VMAX)
 		face_colors = THERMAL_CMAP_3D(norm(face_temps))
-		if show_burned_elements:
-			burned_boundary_mask = _burned_boundary_face_mask(boundary_faces, elems, burned_elements)
-			face_colors[burned_boundary_mask] = (0.0, 0.0, 0.0, 1.0)
+		burned_boundary_mask = _burned_boundary_face_mask(boundary_faces, elems, burned_elements)
+		face_colors[burned_boundary_mask] = (0.0, 0.0, 0.0, 1.0)
 		full_surface = Poly3DCollection(
 			[pts[face] for face in boundary_faces],
 			facecolors=face_colors,
@@ -1471,11 +1329,11 @@ def run(args: argparse.Namespace):
 		region_fills = _add_region_overlays_3d(ax_full, pts, boundary_faces, boundary_phys, visual_regions, include_solid_fill=True)
 		region_edges = _add_region_edges_3d(ax_full, pts, boundary_faces, boundary_phys, visual_regions)
 		burned_tetra_surface = Poly3DCollection(
-			_burned_boundary_face_vertices(pts, boundary_faces, elems, burned_elements) if show_burned_elements else [],
+			_burned_boundary_face_vertices(pts, boundary_faces, elems, burned_elements),
 			facecolors=(0.0, 0.0, 0.0, 1.0),
 			edgecolors=(0.0, 0.0, 0.0, 1.0),
 			linewidths=0.12,
-			alpha=0.9 if show_burned_elements else 0.0,
+			alpha=0.9,
 			zorder=9,
 		)
 		ax_full.add_collection3d(burned_tetra_surface)
@@ -1501,8 +1359,7 @@ def run(args: argparse.Namespace):
 			_set_equal_3d_axes(local_ax, pts)
 		legend_handles = _build_region_legend_handles(visual_regions)
 		legend_handles.append(source_marker_full)
-		if show_burned_elements:
-			legend_handles.append(Patch(facecolor="black", edgecolor="black", alpha=0.9, label="Brule"))
+		legend_handles.append(Patch(facecolor="black", edgecolor="black", alpha=0.9, label="Brule"))
 		if legend_handles:
 			ax_full.legend(handles=legend_handles, loc="upper right", framealpha=0.9, title="Objets / Materiaux")
 		return fig, ax_full, {"mesh_scatter": mesh_scatter, "full_surface": full_surface, "mesh_ax": ax_mesh, "full_ax": ax_full, "region_fills": region_fills, "region_edges": region_edges, "burned_tetra_surface": burned_tetra_surface, "source_marker_mesh": source_marker_mesh, "source_marker_full": source_marker_full}
@@ -1544,26 +1401,19 @@ def run(args: argparse.Namespace):
 		record_timing("initial_setup_png_save", time.perf_counter() - t1, details=str(setup_png_path))
 		plt.close(fig_init)
 
-	should_render = bool(args.plot or getattr(args, "save", None))
-	fig = ax = visuals = None
-	if should_render:
-		t0 = time.perf_counter()
-		fig, ax, visuals = _setup_axes(t, "Temps: 0.0s | Tmax: {:.1f}K".format(float(np.max(t))))
-		record_timing("animation_figure", time.perf_counter() - t0)
+	t0 = time.perf_counter()
+	fig, ax, visuals = _setup_axes(t, "Temps: 0.0s | Tmax: {:.1f}K".format(float(np.max(t))))
+	record_timing("animation_figure", time.perf_counter() - t0)
 	state = {"t": t, "time": 0.0}
 	ani = None
 	rng = np.random.default_rng()
-	cached_frozen_dofs = empty_dofs
-	cached_free_dofs = free_dofs
 
 	def _update_visual(local_t: np.ndarray, sim_time: float):
-		if visuals is None or ax is None:
-			return []
 		if dim == 2:
 			field = visuals["field"]
 			burned_collection = visuals["burned_collection"]
 			field.set_array(local_t)
-			burned_collection.set_verts(_burned_triangle_vertices(pts, elems, burned_elements) if show_burned_elements else [])
+			burned_collection.set_verts(_burned_triangle_vertices(pts, elems, burned_elements))
 			ax.set_title(f"Temps: {sim_time:.1f}s | Tmax: {np.max(local_t):.1f}K")
 			return [field, burned_collection]
 		else:
@@ -1577,20 +1427,18 @@ def run(args: argparse.Namespace):
 			face_temps = np.mean(local_t[boundary_faces], axis=1)
 			norm = Normalize(vmin=THERMAL_3D_VMIN, vmax=THERMAL_3D_VMAX)
 			face_colors = THERMAL_CMAP_3D(norm(face_temps))
-			if show_burned_elements:
-				burned_boundary_mask = _burned_boundary_face_mask(boundary_faces, elems, burned_elements)
-				face_colors[burned_boundary_mask] = (0.0, 0.0, 0.0, 1.0)
+			burned_boundary_mask = _burned_boundary_face_mask(boundary_faces, elems, burned_elements)
+			face_colors[burned_boundary_mask] = (0.0, 0.0, 0.0, 1.0)
 			full_surface.set_facecolor(face_colors)
-			burned_tetra_surface.set_verts(_burned_boundary_face_vertices(pts, boundary_faces, elems, burned_elements) if show_burned_elements else [])
+			burned_tetra_surface.set_verts(_burned_boundary_face_vertices(pts, boundary_faces, elems, burned_elements))
 			burned_tetra_surface.set_facecolor((0.0, 0.0, 0.0, 1.0))
 			burned_tetra_surface.set_edgecolor((0.0, 0.0, 0.0, 1.0))
-			burned_tetra_surface.set_alpha(0.9 if show_burned_elements else 0.0)
+			burned_tetra_surface.set_alpha(0.9)
 			mesh_ax.set_title(f"Temps: {sim_time:.1f}s | Tmax: {np.max(local_t):.1f}K | Vue maillage")
 			full_ax.set_title(f"Temps: {sim_time:.1f}s | Tmax: {np.max(local_t):.1f}K | Vue pleine")
 			return [mesh_scatter, full_surface, burned_tetra_surface]
 
 	def advance_state(current_t: np.ndarray, current_time: float) -> tuple[np.ndarray, float, float]:
-		nonlocal cached_frozen_dofs, cached_free_dofs
 		t_local = current_t
 		sim_time = float(current_time)
 		t0 = time.perf_counter()
@@ -1616,28 +1464,17 @@ def run(args: argparse.Namespace):
 			rhs = src + bc_field.rhs + volume_loss.rhs - radiation_loss_rhs
 			frozen_dofs = np.flatnonzero(frozen_nodes)
 			frozen_vals = t_local[frozen_dofs]
-			if len(frozen_dofs) == 0:
-				step_free_dofs = free_dofs
-				cached_frozen_dofs = empty_dofs
-				cached_free_dofs = free_dofs
-			elif np.array_equal(frozen_dofs, cached_frozen_dofs):
-				step_free_dofs = cached_free_dofs
-			else:
-				cached_frozen_dofs = frozen_dofs.copy()
-				cached_free_dofs = precompute_dirichlet_dofs(len(pts), cached_frozen_dofs)
-				step_free_dofs = cached_free_dofs
 			t_local = np.asarray(
-				theta_step_fast(
+				theta_step(
 					system.m_mat,
 					k_eff,
 					rhs,
 					rhs,
-					t_local,
-					dt=dt,
-					theta=theta,
+			t_local,
+			dt=dt,
+			theta=theta,
 					dirichlet_dofs=frozen_dofs if len(frozen_dofs) else empty_dofs,
 					dir_vals_np1=frozen_vals if len(frozen_dofs) else empty_vals,
-					free_dofs=step_free_dofs,
 				),
 				dtype=float,
 			)
@@ -1694,33 +1531,28 @@ def run(args: argparse.Namespace):
 		return t_local, sim_time, time.perf_counter() - t0
 
 	if not args.plot:
+		headless_frames = [t.copy()]
+		headless_times = [0.0]
+		headless_burned = [burned_elements.copy()]
 		t0 = time.perf_counter()
+		for frame_idx in range(steps):
+			t, sim_time, elapsed = advance_state(t, headless_times[-1])
+			record_timing("frame_calculation", elapsed, frame=frame_idx, details=f"sim_time={sim_time:.5f}")
+			headless_frames.append(t.copy())
+			headless_times.append(sim_time)
+			headless_burned.append(burned_elements.copy())
+		state["t"] = t
+		state["time"] = headless_times[-1]
+		record_timing("headless_calculation_total", time.perf_counter() - t0, details=f"frames={steps};dim={dim}")
+
+		def update_anim(frame_idx: int):
+			burned_elements[:] = headless_burned[frame_idx]
+			return _update_visual(headless_frames[frame_idx], headless_times[frame_idx])
+
 		if getattr(args, "save", None):
-			headless_frames = [t.copy()]
-			headless_times = [0.0]
-			headless_burned = [burned_elements.copy()]
-			for frame_idx in range(steps):
-				t, sim_time, elapsed = advance_state(t, headless_times[-1])
-				record_timing("frame_calculation", elapsed, frame=frame_idx, details=f"sim_time={sim_time:.5f}")
-				headless_frames.append(t.copy())
-				headless_times.append(sim_time)
-				headless_burned.append(burned_elements.copy())
-			state["t"] = t
-			state["time"] = headless_times[-1]
-
-			def update_anim(frame_idx: int):
-				burned_elements[:] = headless_burned[frame_idx]
-				return _update_visual(headless_frames[frame_idx], headless_times[frame_idx])
-
 			ani = FuncAnimation(fig, update_anim, frames=len(headless_frames), interval=100, blit=False, repeat=False)
 		else:
-			sim_time = 0.0
-			for frame_idx in range(steps):
-				t, sim_time, elapsed = advance_state(t, sim_time)
-				record_timing("frame_calculation", elapsed, frame=frame_idx, details=f"sim_time={sim_time:.5f}")
-			state["t"] = t
-			state["time"] = sim_time
-		record_timing("headless_calculation_total", time.perf_counter() - t0, details=f"frames={steps};dim={dim}")
+			plt.close(fig)
 	else:
 		def update_anim(frame_idx: int, local_state: dict[str, np.ndarray]):
 			t_local, sim_time, _elapsed = advance_state(local_state["t"], float(local_state["time"]))
@@ -1784,7 +1616,6 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--2d", dest="dim", action="store_const", const=2, help="Force le mode 2D")
 	parser.add_argument("--3d", dest="dim", action="store_const", const=3, help="Force le mode 3D")
 	parser.add_argument("--no-plot", dest="plot", action="store_false", help="Desactive l'affichage final")
-	parser.add_argument("--hide-burned-elements", dest="hide_burned_elements", action="store_true", help="Masque l'affichage noir des elements brules sans desactiver leur calcul")
 	parser.add_argument("--save", dest="save", type=str, default=None, help="Nom de fichier MP4 pour sauvegarder l'animation")
 	parser.set_defaults(plot=True)
 	return parser
