@@ -1,3 +1,4 @@
+#simulation diffusion-reacction 2D/3D
 from __future__ import annotations
 
 import argparse
@@ -29,7 +30,7 @@ from calculs.mass import assemble_mass_from_preassembled, preassemble_mass_unit
 from calculs.stiffness import assemble_stiffness_from_preassembled, preassemble_stiffness_unit
 from materialsbank import get_burn_material_name, get_material, get_material_color, get_material_overlay_alpha
 
-PHYSICAL_ID_MAP_2D = {
+PHYSICAL_ID_MAP = { # lien id mesh -> materiau
 	1: "bois",
 	2: "beton",
 	3: "verre",
@@ -40,18 +41,7 @@ PHYSICAL_ID_MAP_2D = {
 	8: "explosif",
 }
 
-PHYSICAL_ID_MAP_3D = {
-	1: "bois",
-	2: "beton",
-	3: "verre",
-	4: "isolation",
-	5: "air",
-	6: "metal",
-	7: "meche",
-	8: "explosif",
-}
-
-ROLE_KEYWORDS = {
+ROLE_KEYWORDS = { # lien materiau -> role dans la visualisation
 	"wall": {"mur", "murs", "wall", "walls"},
 	"window": {"fenetre", "fenetres", "window", "windows", "glass", "verre"},
 	"floor": {"sol", "floor", "slab", "dalle"},
@@ -59,7 +49,7 @@ ROLE_KEYWORDS = {
 	"column": {"colonne", "colonnes", "column", "columns", "pillar", "pillars"},
 }
 
-THERMAL_CMAP = LinearSegmentedColormap.from_list(
+THERMAL_CMAP = LinearSegmentedColormap.from_list( # lien temperature -> couleur 2D
 	"thermal_white_red",
 	[
 		(1.0, 1.0, 1.0, 0.55),
@@ -70,7 +60,7 @@ THERMAL_CMAP = LinearSegmentedColormap.from_list(
 	N=256,
 )
 
-THERMAL_CMAP_3D = LinearSegmentedColormap.from_list(
+THERMAL_CMAP_3D = LinearSegmentedColormap.from_list( # lien temperature -> couleur 3D
 	"thermal_3d_white_purple_red",
 	[
 		(1.0, 1.0, 1.0, 1.0),
@@ -79,12 +69,12 @@ THERMAL_CMAP_3D = LinearSegmentedColormap.from_list(
 	],
 	N=256,
 )
-THERMAL_3D_VMIN = 200.0
+THERMAL_3D_VMIN = 200.0 # pour cap les valeurs lors du débuggages des anomalies
 THERMAL_3D_VMAX = 10000.0
 
 
 @dataclass
-class BoundaryConditionField:
+class BoundaryConditionField: # class CL
 	weights: np.ndarray
 	h: np.ndarray
 	t_ext: np.ndarray
@@ -94,7 +84,7 @@ class BoundaryConditionField:
 
 
 @dataclass
-class VolumeLossField:
+class VolumeLossField: # class simplification perte de volume
 	linear_coeff: float
 	radiation_coeff: float
 	t_ext: float
@@ -103,7 +93,7 @@ class VolumeLossField:
 
 
 @dataclass
-class ElementwiseSystem:
+class ElementwiseSystem: # class systeme element par element
 	k_mat: csr_matrix
 	m_mat: csr_matrix
 	m_unit: csr_matrix
@@ -130,23 +120,42 @@ class ElementwiseSystem:
 
 
 @dataclass
-class VerticalHeatTransferField:
+class VerticalHeatTransferField: # class simplification transfert de chaleur vertical
 	enabled: bool
 	targets: list[np.ndarray]
 	dz: list[np.ndarray]
 	element_volumes: np.ndarray
 
 
-def _physical_id_to_name_map(msh: meshio.Mesh, dim: int) -> dict[int, str]:
-	return (PHYSICAL_ID_MAP_2D if dim == 2 else PHYSICAL_ID_MAP_3D).copy()
+def _physical_id_to_name_map(msh: meshio.Mesh, dim: int) -> dict[int, str]: #visuel 
+	"""
+	helper mapping id mesh -> materiau
+
+	param: msh: meshio.Mesh
+	param: dim: dimension du maillage (2 ou 3)
+	return: dict[int, str] mapping id mesh -> nom du materiau
+	"""
+	return PHYSICAL_ID_MAP.copy()
 
 
-def _format_region_label(raw_name: str) -> str:
+def _format_region_label(raw_name: str) -> str: # visuel
+	"""
+	helper formatage label region
+
+	param: raw_name: nom brut de la region
+	return: str label formaté
+	"""
 	label = str(raw_name).strip().replace("_", " ")
 	return " ".join(part.capitalize() for part in label.split()) or "Region"
 
 
-def _infer_region_role(raw_name: str) -> str:
+def _infer_region_role(raw_name: str) -> str: # visuel
+	"""
+	helper inférence role region 
+	
+	param: raw_name: nom brut de la region
+	return: str role inféré (wall, window, floor, door, column ou region)
+	"""
 	name = str(raw_name).strip().lower()
 	tokens = {token for token in name.replace("-", "_").split("_") if token}
 	for role, keywords in ROLE_KEYWORDS.items():
@@ -155,7 +164,14 @@ def _infer_region_role(raw_name: str) -> str:
 	return "region"
 
 
-def _build_visual_regions(phys_ids: np.ndarray, phys_name_map: dict[int, str]) -> list[dict[str, object]]:
+def _build_visual_regions(phys_ids: np.ndarray, phys_name_map: dict[int, str]) -> list[dict[str, object]]: # visuel
+	"""
+	helper construction regions pour visualisation
+
+	param: phys_ids: tableau des ids physiques par element
+	param: phys_name_map: mapping id mesh -> nom du materiau
+	return: list[dict[str, object]] liste des regions 
+	"""
 	regions: list[dict[str, object]] = []
 	for pid in sorted({int(pid) for pid in phys_ids}):
 		raw_name = str(phys_name_map.get(pid, f"region_{pid}")).strip()
@@ -186,7 +202,14 @@ def _build_visual_regions(phys_ids: np.ndarray, phys_name_map: dict[int, str]) -
 	return regions
 
 
-def _load_mesh_data(mesh_path: Path, dim: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[int, str], int]:
+def load_mesh_data(mesh_path: Path, dim: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[int, str], int]: # chargement du maillage
+	"""
+	Charge le maillage, en mergeant les noeuds doublons dans la 3D (répare la diffusion sol-> mur)
+
+	param: mesh_path: chemin vers le fichier de maillage
+	param: dim: dimension souhaitée (2 ou 3), auto-détectée si les éléments du type demandé sont absents
+	return: tuple contenant les points, les éléments, les ids physiques, le mapping id->nom physique et la dimension finale utilisée
+	"""
 	msh = meshio.read(str(mesh_path))
 	cell_type = "triangle" if dim == 2 else "tetra"
 	elems = np.asarray(msh.cells_dict.get(cell_type, np.array([], dtype=int)), dtype=int)
@@ -218,14 +241,14 @@ def _load_mesh_data(mesh_path: Path, dim: int) -> tuple[np.ndarray, np.ndarray, 
 
 
 @njit(cache=True)
-def _build_p1_triangle_quadrature_numba(points: np.ndarray, elems: np.ndarray, n_ref: np.ndarray):
+def Nbuild_quadra_2D(points: np.ndarray, elems: np.ndarray, n_ref: np.ndarray): #process numba
 	ne = len(elems)
 	ngp = n_ref.shape[0]
 	jac = np.zeros((ne, ngp, 3, 3), dtype=np.float64)
 	det = np.zeros((ne, ngp), dtype=np.float64)
 	coords = np.zeros((ne, ngp, 3), dtype=np.float64)
 
-	for e in range(ne):
+	for e in range(ne):                       # comme petite matrice, moins couteux que de faire les sous matrice pour le jacobien
 		i0 = elems[e, 0]
 		i1 = elems[e, 1]
 		i2 = elems[e, 2]
@@ -255,23 +278,23 @@ def _build_p1_triangle_quadrature_numba(points: np.ndarray, elems: np.ndarray, n
 
 
 @njit(cache=True)
-def _det3(jac_e: np.ndarray) -> float:
-	return (
+def _det3(jac_e: np.ndarray) -> float: #process numba
+	return (																	#comme petite matrice, moins couteux
 		jac_e[0, 0] * (jac_e[1, 1] * jac_e[2, 2] - jac_e[1, 2] * jac_e[2, 1])
 		- jac_e[0, 1] * (jac_e[1, 0] * jac_e[2, 2] - jac_e[1, 2] * jac_e[2, 0])
 		+ jac_e[0, 2] * (jac_e[1, 0] * jac_e[2, 1] - jac_e[1, 1] * jac_e[2, 0])
 	)
 
 
-@njit(cache=True)
-def _build_p1_tetra_quadrature_numba(points: np.ndarray, elems: np.ndarray, bary: np.ndarray):
+@njit(cache=True) 
+def Nbuild_quadra_3D(points: np.ndarray, elems: np.ndarray, bary: np.ndarray): #process numba
 	ne = len(elems)
 	ngp = bary.shape[0]
 	jac = np.zeros((ne, ngp, 3, 3), dtype=np.float64)
 	det = np.zeros((ne, ngp), dtype=np.float64)
 	coords = np.zeros((ne, ngp, 3), dtype=np.float64)
 
-	for e in range(ne):
+	for e in range(ne):                                                        # même justification que précedement
 		i0 = elems[e, 0]
 		i1 = elems[e, 1]
 		i2 = elems[e, 2]
@@ -300,17 +323,15 @@ def _build_p1_tetra_quadrature_numba(points: np.ndarray, elems: np.ndarray, bary
 	return jac, det, coords
 
 
-def _build_p1_triangle_quadrature(points: np.ndarray, elems: np.ndarray):
-	quad_ref = np.array(
-		[
-			[1.0 / 6.0, 1.0 / 6.0],
-			[2.0 / 3.0, 1.0 / 6.0],
-			[1.0 / 6.0, 2.0 / 3.0],
-		],
-		dtype=float,
-	)
+def build_triangle_quadra(points: np.ndarray, elems: np.ndarray): # calcul 
+	"""
+	Construit la quadrature des éléments 2D de type triangle P1
+
+	param: points: tableau des coordonnées des points du maillage
+	param: elems: tableau des éléments du maillage  
+	"""
 	w = np.full(3, 1.0 / 6.0, dtype=float)
-	n_ref = np.array(
+	n_ref = np.array( # quadrature de degré 2 pour le triangle, 3 points de quadrature
 		[
 			[2.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0],
 			[1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0],
@@ -328,19 +349,21 @@ def _build_p1_triangle_quadrature(points: np.ndarray, elems: np.ndarray):
 	)
 
 	ngp = len(w)
-	jac, det, coords = _build_p1_triangle_quadrature_numba(
-		np.asarray(points, dtype=np.float64),
-		np.asarray(elems, dtype=np.int64),
-		n_ref,
-	)
+	jac, det, coords = Nbuild_quadra_2D( np.asarray(points, dtype=np.float64),np.asarray(elems, dtype=np.int64),n_ref,)
 
 	return w, n_ref, np.repeat(grad_ref[None, :, :], ngp, axis=0), jac, det, coords
 
 
-def _build_p1_tetra_quadrature(points: np.ndarray, elems: np.ndarray):
-	a = 0.5854101966249685
+def build_tetra_quadra(points: np.ndarray, elems: np.ndarray): #calcul
+	"""
+	Construit la quadrature des éléments 3D de type tétraèdre P1
+
+	param: points: tableau des coordonnées des points du maillage
+	param: elems: tableau des éléments du maillage
+	"""
+	a = 0.5854101966249685 
 	b = 0.1381966011250105
-	bary = np.array(
+	bary = np.array( # quadrature de degré 2 pour le tétraèdre, 4 points de quadrature
 		[
 			[a, b, b, b],
 			[b, a, b, b],
@@ -362,7 +385,7 @@ def _build_p1_tetra_quadrature(points: np.ndarray, elems: np.ndarray):
 	)
 
 	ngp = len(w)
-	jac, det, coords = _build_p1_tetra_quadrature_numba(
+	jac, det, coords = Nbuild_quadra_3D(
 		np.asarray(points, dtype=np.float64),
 		np.asarray(elems, dtype=np.int64),
 		bary,
@@ -371,19 +394,46 @@ def _build_p1_tetra_quadrature(points: np.ndarray, elems: np.ndarray):
 	return w, n_ref, np.repeat(grad_ref[None, :, :], ngp, axis=0), jac, det, coords
 
 
-def _build_p1_quadrature(points: np.ndarray, elems: np.ndarray, dim: int):
-	return _build_p1_triangle_quadrature(points, elems) if dim == 2 else _build_p1_tetra_quadrature(points, elems)
+def _build_p1_quadrature(points: np.ndarray, elems: np.ndarray, dim: int): # calcul
+	"""
+	wrapper des constructions de quadrature
+
+	param: dim: dimension du maillage
+	"""
+	return build_triangle_quadra(points, elems) if dim == 2 else build_tetra_quadra(points, elems)
 
 
-def _element_tc_values(phys_ids: np.ndarray, phys_name_map: dict[int, str]) -> np.ndarray:
+def _element_tc_values(phys_ids: np.ndarray, phys_name_map: dict[int, str]) -> np.ndarray: #données
+	"""
+	helper extraction temperature de combustion par element
+
+	param: phys_ids: tableau des ids physiques par element
+	param: phys_name_map: mapping id mesh -> nom du materiau
+	return: tableau des temperature de combustion par element
+	"""
 	return np.asarray([float(get_material(str(phys_name_map.get(int(pid), "bois")).strip().lower())["Tc"]) for pid in phys_ids], dtype=float)
 
 
-def _initial_element_materials(phys_ids: np.ndarray, phys_name_map: dict[int, str]) -> np.ndarray:
+def _initial_element_materials(phys_ids: np.ndarray, phys_name_map: dict[int, str]) -> np.ndarray: # données
+	"""
+	helper extraction nom du materiau par element
+
+	param: phys_ids: tableau des ids physiques par element
+	param: phys_name_map: mapping id mesh -> nom du materiau
+	return: tableau des noms de materiau par element
+	"""
 	return np.asarray([str(phys_name_map.get(int(pid), "bois")).strip().lower() for pid in phys_ids], dtype=object)
 
 
-def _node_reaction_fields(elems: np.ndarray, elem_material_names: np.ndarray, n_nodes: int) -> tuple[np.ndarray, np.ndarray]:
+def _node_reaction_fields(elems: np.ndarray, elem_material_names: np.ndarray, n_nodes: int) -> tuple[np.ndarray, np.ndarray]: # calcul
+	"""
+	helper construction champs de reaction aux noeuds (q et tc)
+
+	param: elems: tableau des éléments du maillage
+	param: elem_material_names: tableau des noms de materiau par element
+	param: n_nodes: nombre de noeuds dans le maillage
+	return: tuple de tableaux (q_node, tc_node) contenant q et tc 
+	"""
 	q_node = np.zeros(n_nodes, dtype=float)
 	tc_node = np.full(n_nodes, np.inf, dtype=float)
 	for nodes, mat_name in zip(elems, elem_material_names, strict=False):
@@ -393,110 +443,29 @@ def _node_reaction_fields(elems: np.ndarray, elem_material_names: np.ndarray, n_
 			tc_node[int(ni)] = min(tc_node[int(ni)], float(mat["Tc"]))
 	return q_node, tc_node
 
-
-@njit(cache=True)
-def _local_unit_matrices_from_quadrature_numba(
-	elems: np.ndarray,
-	w: np.ndarray,
-	n_ref: np.ndarray,
-	grad_ref: np.ndarray,
-	jac: np.ndarray,
-	det: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-	ne = elems.shape[0]
-	nloc = elems.shape[1]
-	ngp = w.shape[0]
-	unit_mass = np.zeros((ne, nloc, nloc), dtype=np.float64)
-	unit_stiffness = np.zeros((ne, nloc, nloc), dtype=np.float64)
-	unit_load = np.zeros((ne, nloc), dtype=np.float64)
-	grads = np.zeros((nloc, 3), dtype=np.float64)
-
-	for e in range(ne):
-		for g in range(ngp):
-			j00 = jac[e, g, 0, 0]
-			j01 = jac[e, g, 0, 1]
-			j02 = jac[e, g, 0, 2]
-			j10 = jac[e, g, 1, 0]
-			j11 = jac[e, g, 1, 1]
-			j12 = jac[e, g, 1, 2]
-			j20 = jac[e, g, 2, 0]
-			j21 = jac[e, g, 2, 1]
-			j22 = jac[e, g, 2, 2]
-			det_j = (
-				j00 * (j11 * j22 - j12 * j21)
-				- j01 * (j10 * j22 - j12 * j20)
-				+ j02 * (j10 * j21 - j11 * j20)
-			)
-			inv_det = 1.0 / det_j
-			i00 = (j11 * j22 - j12 * j21) * inv_det
-			i01 = (j02 * j21 - j01 * j22) * inv_det
-			i02 = (j01 * j12 - j02 * j11) * inv_det
-			i10 = (j12 * j20 - j10 * j22) * inv_det
-			i11 = (j00 * j22 - j02 * j20) * inv_det
-			i12 = (j02 * j10 - j00 * j12) * inv_det
-			i20 = (j10 * j21 - j11 * j20) * inv_det
-			i21 = (j01 * j20 - j00 * j21) * inv_det
-			i22 = (j00 * j11 - j01 * j10) * inv_det
-
-			for a in range(nloc):
-				g0 = grad_ref[g, a, 0]
-				g1 = grad_ref[g, a, 1]
-				g2 = grad_ref[g, a, 2]
-				grads[a, 0] = i00 * g0 + i01 * g1 + i02 * g2
-				grads[a, 1] = i10 * g0 + i11 * g1 + i12 * g2
-				grads[a, 2] = i20 * g0 + i21 * g1 + i22 * g2
-
-			wg_det = w[g] * det[e, g]
-			for a in range(nloc):
-				unit_load[e, a] += wg_det * n_ref[g, a]
-				for b in range(nloc):
-					unit_mass[e, a, b] += wg_det * n_ref[g, a] * n_ref[g, b]
-					unit_stiffness[e, a, b] += wg_det * (
-						grads[a, 0] * grads[b, 0]
-						+ grads[a, 1] * grads[b, 1]
-						+ grads[a, 2] * grads[b, 2]
-					)
-
-	return unit_mass, unit_stiffness, unit_load
-
-
-def _local_unit_matrices_from_quadrature(
-	elems: np.ndarray,
-	w: np.ndarray,
-	n_ref: np.ndarray,
-	grad_ref: np.ndarray,
-	jac: np.ndarray,
-	det: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-	return _local_unit_matrices_from_quadrature_numba(
-		np.asarray(elems, dtype=np.int64),
-		np.asarray(w, dtype=np.float64),
-		np.asarray(n_ref, dtype=np.float64),
-		np.asarray(grad_ref, dtype=np.float64),
-		np.asarray(jac, dtype=np.float64),
-		np.asarray(det, dtype=np.float64),
-	)
-
-
-def _local_unit_matrices(points: np.ndarray, elems: np.ndarray, dim: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-	w, n_ref, grad_ref, jac, det, _coords = _build_p1_quadrature(points, elems, dim)
-	return _local_unit_matrices_from_quadrature(elems, w, n_ref, grad_ref, jac, det)
-
-
-def _unit_load_from_quadrature(w: np.ndarray, n_ref: np.ndarray, det: np.ndarray) -> np.ndarray:
-	return np.einsum("eg,g,ga->ea", det, w, n_ref, optimize=True)
-
-
 def _assemble_vector_from_local(elems: np.ndarray, local_values: np.ndarray, n_nodes: int) -> np.ndarray:
+	"""
+	helper assembly d'un vecteur à partir de valeurs locales
+
+	param: elems: tableau des éléments du maillage
+	param: local_values: tableau des valeurs locales
+	param: n_nodes: nombre de noeuds dans le maillage
+	return: tableau du vecteur assemblé
+	"""
 	values = np.zeros(n_nodes, dtype=float)
 	np.add.at(values, elems.reshape(-1), local_values.reshape(-1))
 	return values
 
 
-def _material_coefficients(
-	elem_material_names: np.ndarray,
-	use_burn_delta: bool = False,
-) -> tuple[np.ndarray, np.ndarray]:
+def _material_coefficients( elem_material_names: np.ndarray,use_burn_delta: bool = False,) -> tuple[np.ndarray, np.ndarray]:# données
+	"""
+	helpeur extraction des coefficients thermiques (k et rho*c) par element, avec option de delta de combustion
+
+	param: elem_material_names: tableau des noms de materiau par element
+	param: use_burn_delta: si True, retourne les deltas de k et rho*c entre le materiau brûlé et non-brûlé
+	return: tuple de tableaux (k_coeffs, m_coeffs) contenant k et rho*c
+	"""
+
 	k_coeffs = np.zeros(len(elem_material_names), dtype=float)
 	m_coeffs = np.zeros(len(elem_material_names), dtype=float)
 	for idx, mat_name in enumerate(elem_material_names):
@@ -510,47 +479,32 @@ def _material_coefficients(
 			m_coeffs[idx] = float(mat["rho"]) * float(mat["c"])
 	return k_coeffs, m_coeffs
 
+def _default_vertical_air_radius(points: np.ndarray, elems: np.ndarray) -> float: # calcul
+	"""
+	Simule un rayon d'action de la monté de la chaleur au étage dans la simplification 3D
 
-def _assemble_material_matrices_from_preassembled(
-	system: ElementwiseSystem,
-	k_coeffs: np.ndarray,
-	m_coeffs: np.ndarray,
-) -> tuple[csr_matrix, csr_matrix]:
-	k_mat = assemble_stiffness_from_preassembled(
-		system.stiffness_rows,
-		system.stiffness_cols,
-		system.stiffness_unit_data,
-		system.stiffness_n_nodes,
-		system.stiffness_nloc,
-		k_coeffs,
-	)
-	m_mat = assemble_mass_from_preassembled(
-		system.mass_rows,
-		system.mass_cols,
-		system.mass_unit_data,
-		system.mass_n_nodes,
-		system.mass_nloc,
-		m_coeffs,
-	)
-	return k_mat, m_mat
-
-
-def _default_vertical_air_radius(points: np.ndarray, elems: np.ndarray) -> float:
+	param: points: tableau des coordonnées des points du maillage
+	param: elems: tableau des éléments du maillage
+	return: rayon d'action 
+	"""
 	centroids = np.mean(points[elems], axis=1)
 	spans = np.ptp(centroids[:, :2], axis=0)
 	area = max(float(spans[0] * spans[1]), 1e-12)
 	return 1.5 * float(np.sqrt(area / max(len(elems), 1)))
 
+def _build_vertical_heat_transfer_field(points: np.ndarray, elems: np.ndarray, unit_load_local: np.ndarray, dim: int, enabled: bool, attenuation_per_m: float, horizontal_radius: float) -> VerticalHeatTransferField: # calcul
+	"""
+	Construit le champ de transfert de chaleur vertical
 
-def _build_vertical_heat_transfer_field(
-	points: np.ndarray,
-	elems: np.ndarray,
-	unit_load_local: np.ndarray,
-	dim: int,
-	enabled: bool,
-	attenuation_per_m: float,
-	horizontal_radius: float,
-) -> VerticalHeatTransferField:
+	param: points: tableau des coordonnées des points du maillage
+	param: elems: tableau des éléments du maillage
+	param: unit_load_local: tableau des charges unitaires locales par élément
+	param: dim: dimension du maillage
+	param: enabled: bool indiquant si le transfert de chaleur vertical est activé
+	param: attenuation_per_m: coefficient d'atténuation de la chaleur par mètre de distance verticale
+	param: horizontal_radius: rayon d'influence horizontal pour le transfert de chaleur vertical, ou 0 pour auto-détection
+	return: VerticalHeatTransferField contenant les informations nécessaires pour appliquer le transfert de chaleur vertical
+	"""
 	element_volumes = np.sum(unit_load_local, axis=1)
 	if dim != 3 or not enabled:
 		return VerticalHeatTransferField(False, [], [], element_volumes)
@@ -572,68 +526,40 @@ def _build_vertical_heat_transfer_field(
 
 	return VerticalHeatTransferField(True, targets, dz_by_source, element_volumes)
 
+def _assemble_elementwise_system(points: np.ndarray, elems: np.ndarray, phys_ids: np.ndarray, phys_name_map: dict[int, str], dim: int ) -> ElementwiseSystem: # calcul
+	"""
+	Helper assamblant le système élément par élément
 
-def _assemble_elementwise_system(
-	points: np.ndarray,
-	elems: np.ndarray,
-	phys_ids: np.ndarray,
-	phys_name_map: dict[int, str],
-	dim: int,
-) -> ElementwiseSystem:
+	param: points: tableau des coordonnées des points du maillage
+	param: elems: tableau des éléments du maillage
+	param: phys_ids: tableau des ids physiques par élément
+	param: phys_name_map: mapping id mesh -> nom du materiau
+	param: dim: dimension du maillage
+	return: ElementwiseSystem contenant les matrices, champs et informations nécessaires pour la simulation
+	"""
 	n_nodes = points.shape[0]
 	elem_material_names = _initial_element_materials(phys_ids, phys_name_map)
 	w, n_ref, grad_ref, jac, det, coords = _build_p1_quadrature(points, elems, dim)
-	unit_load = _unit_load_from_quadrature(w, n_ref, det)
+	unit_load = np.einsum("eg,g,ga->ea", det, w, n_ref, optimize=True)
 	tag_to_dof = np.arange(n_nodes, dtype=int)
-	mass_rows, mass_cols, mass_unit_data, mass_n_nodes, mass_nloc = preassemble_mass_unit(
-		elems.reshape(-1),
-		det,
-		w,
-		n_ref,
-		tag_to_dof,
-	)
-	stiffness_rows, stiffness_cols, stiffness_unit_data, stiffness_n_nodes, stiffness_nloc = preassemble_stiffness_unit(
-		elems.reshape(-1),
-		jac,
-		det,
-		w,
-		grad_ref,
-		tag_to_dof,
-	)
+	mass_rows, mass_cols, mass_unit_data, mass_n_nodes, mass_nloc = preassemble_mass_unit(elems.reshape(-1), det, w, n_ref, tag_to_dof)
+	stiffness_rows, stiffness_cols, stiffness_unit_data, stiffness_n_nodes, stiffness_nloc = preassemble_stiffness_unit(elems.reshape(-1), jac, det, w, grad_ref, tag_to_dof)
 	k_coeffs, m_coeffs = _material_coefficients(elem_material_names)
 	k_mat = assemble_stiffness_from_preassembled(stiffness_rows, stiffness_cols, stiffness_unit_data, stiffness_n_nodes, stiffness_nloc, k_coeffs)
 	m_mat = assemble_mass_from_preassembled(mass_rows, mass_cols, mass_unit_data, mass_n_nodes, mass_nloc, m_coeffs)
 	m_unit = assemble_mass_from_preassembled(mass_rows, mass_cols, mass_unit_data, mass_n_nodes, mass_nloc)
 	q_node, tc_node = _node_reaction_fields(elems, elem_material_names, n_nodes)
 
-	return ElementwiseSystem(
-		k_mat=k_mat,
-		m_mat=m_mat,
-		m_unit=m_unit,
-		unit_load_local=unit_load,
-		q_node=q_node,
-		tc_node=tc_node,
-		elem_material_names=elem_material_names,
-		w=w,
-		n_ref=n_ref,
-		grad_ref=grad_ref,
-		jac=jac,
-		det=det,
-		coords=coords,
-		mass_rows=mass_rows,
-		mass_cols=mass_cols,
-		mass_unit_data=mass_unit_data,
-		mass_n_nodes=mass_n_nodes,
-		mass_nloc=mass_nloc,
-		stiffness_rows=stiffness_rows,
-		stiffness_cols=stiffness_cols,
-		stiffness_unit_data=stiffness_unit_data,
-		stiffness_n_nodes=stiffness_n_nodes,
-		stiffness_nloc=stiffness_nloc,
-	)
+	return ElementwiseSystem(k_mat=k_mat, m_mat=m_mat, m_unit=m_unit, unit_load_local=unit_load, q_node=q_node, tc_node=tc_node, elem_material_names=elem_material_names, w=w, n_ref=n_ref, grad_ref=grad_ref, jac=jac, det=det, coords=coords, mass_rows=mass_rows, mass_cols=mass_cols, mass_unit_data=mass_unit_data, mass_n_nodes=mass_n_nodes, mass_nloc=mass_nloc, stiffness_rows=stiffness_rows, stiffness_cols=stiffness_cols, stiffness_unit_data=stiffness_unit_data,stiffness_n_nodes=stiffness_n_nodes, stiffness_nloc=stiffness_nloc )
 
+def _apply_burn_deltas(system: ElementwiseSystem, elems: np.ndarray, burned_indices: np.ndarray) -> None: #calcul
+	"""
+	Applique la modification au différentes matrice suite à la combustion d'éléments
 
-def _apply_burn_deltas(system: ElementwiseSystem, elems: np.ndarray, burned_indices: np.ndarray) -> None:
+	param: system: ElementwiseSystem contenant les matrices et champs à modifier
+	param: elems: tableau des éléments du maillage
+	param: burned_indices: indices des éléments qui ont brûlé
+	"""
 	if len(burned_indices) == 0:
 		return
 	n_nodes = system.k_mat.shape[0]
@@ -642,7 +568,8 @@ def _apply_burn_deltas(system: ElementwiseSystem, elems: np.ndarray, burned_indi
 	delta_m_coeffs = np.zeros(len(elems), dtype=float)
 	delta_k_coeffs[burned_indices] = local_delta_k
 	delta_m_coeffs[burned_indices] = local_delta_m
-	delta_k, delta_m = _assemble_material_matrices_from_preassembled(system, delta_k_coeffs, delta_m_coeffs)
+	delta_k = assemble_stiffness_from_preassembled( system.stiffness_rows, system.stiffness_cols, system.stiffness_unit_data, system.stiffness_n_nodes, system.stiffness_nloc, delta_k_coeffs)
+	delta_m = assemble_mass_from_preassembled( system.mass_rows, system.mass_cols, system.mass_unit_data, system.mass_n_nodes, system.mass_nloc, delta_m_coeffs )
 	delta_k.eliminate_zeros()
 	delta_m.eliminate_zeros()
 	system.k_mat = system.k_mat + delta_k
@@ -651,8 +578,14 @@ def _apply_burn_deltas(system: ElementwiseSystem, elems: np.ndarray, burned_indi
 		system.elem_material_names[int(elem_idx)] = get_burn_material_name(str(system.elem_material_names[int(elem_idx)]))
 	system.q_node, system.tc_node = _node_reaction_fields(elems, system.elem_material_names, n_nodes)
 
+def _extract_boundary_faces(elems: np.ndarray, phys_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]: # calcul
+	"""
+	helper extraction faces bords
 
-def _extract_boundary_faces(elems: np.ndarray, phys_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+	param: elems: tableau des éléments du maillage
+	param: phys_ids: tableau des ids physiques par élément
+	return: tuple de tableaux (boundary_faces, boundary_phys) contenant faces de bord et ids
+	"""
 	face_map: dict[tuple[int, int, int], tuple[int, int]] = {}
 	for elem, pid in zip(elems, phys_ids, strict=False):
 		local_faces = (
@@ -677,8 +610,14 @@ def _extract_boundary_faces(elems: np.ndarray, phys_ids: np.ndarray) -> tuple[np
 			boundary_phys.append(pid)
 	return np.asarray(boundary_faces, dtype=int), np.asarray(boundary_phys, dtype=int)
 
+def _extract_boundary_edges(elems: np.ndarray, phys_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]: # calcul
+	"""
+	helper extraction arêtes bords
 
-def _extract_boundary_edges(elems: np.ndarray, phys_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+	param: elems: tableau des éléments du maillage
+	param: phys_ids: tableau des ids physiques par élément
+	return: tuple de tableaux (boundary_edges, boundary_phys) contenant arêtes de bord et ids
+	"""
 	edge_map: dict[tuple[int, int], tuple[int, int]] = {}
 	for elem, pid in zip(elems, phys_ids, strict=False):
 		local_edges = (
@@ -702,8 +641,14 @@ def _extract_boundary_edges(elems: np.ndarray, phys_ids: np.ndarray) -> tuple[np
 			boundary_phys.append(pid)
 	return np.asarray(boundary_edges, dtype=int), np.asarray(boundary_phys, dtype=int)
 
+def _boundary_weights_2d(points: np.ndarray, boundary_edges: np.ndarray) -> np.ndarray: # calcul
+	"""
+	helper calcul poids contributions frontière 2D
 
-def _boundary_weights_2d(points: np.ndarray, boundary_edges: np.ndarray) -> np.ndarray:
+	param: points: tableau des coordonnées des points du maillage
+	param: boundary_edges: tableau des arêtes de bord
+	return: tableau des poids de contribution aux conditions de bord pour chaque noeud
+	"""
 	weights = np.zeros(len(points), dtype=float)
 	for i, j in boundary_edges:
 		length = float(np.linalg.norm(points[int(i), :2] - points[int(j), :2]))
@@ -712,7 +657,14 @@ def _boundary_weights_2d(points: np.ndarray, boundary_edges: np.ndarray) -> np.n
 	return weights
 
 
-def _boundary_weights_3d(points: np.ndarray, boundary_faces: np.ndarray) -> np.ndarray:
+def _boundary_weights_3d(points: np.ndarray, boundary_faces: np.ndarray) -> np.ndarray: # calcul
+	"""
+	helper calcul poids contributions frontière 3D
+
+	param: points: tableau des coordonnées des points du maillage
+	param: boundary_faces: tableau des faces de bord
+	return: tableau des poids de contribution aux conditions de bord pour chaque noeud
+	"""
 	weights = np.zeros(len(points), dtype=float)
 	for i, j, k in boundary_faces:
 		p0 = points[int(i)]
@@ -725,13 +677,17 @@ def _boundary_weights_3d(points: np.ndarray, boundary_faces: np.ndarray) -> np.n
 	return weights
 
 
-def _build_boundary_condition_field(
-	points: np.ndarray,
-	boundary_entities: np.ndarray,
-	dim: int,
-	h_conv: float,
-	t_ext: float,
-) -> BoundaryConditionField:
+def _build_boundary_condition_field(points: np.ndarray, boundary_entities: np.ndarray, dim: int, h_conv: float, t_ext: float ) -> BoundaryConditionField: # calcul
+	"""
+	Construit le champ de conditions de bord convectives
+
+	param: points: tableau des coordonnées des points du maillage
+	param: boundary_entities: tableau des entités de bord
+	param: dim: dimension du maillage
+	param: h_conv: coefficient de convection pour les conditions de bord convectives
+	param: t_ext: température extérieure pour les conditions de bord convectives
+	return: BoundaryConditionField 
+	"""
 	weights = _boundary_weights_2d(points, boundary_entities) if dim == 2 else _boundary_weights_3d(points, boundary_entities)
 	h = np.zeros(len(points), dtype=float)
 	external_temperature = np.full(len(points), float(t_ext), dtype=float)
@@ -741,38 +697,37 @@ def _build_boundary_condition_field(
 	diag_values = h * weights
 	loss_matrix = diags(diag_values, offsets=0, shape=(len(points), len(points)), format="csr")
 	rhs = diag_values * external_temperature
-	return BoundaryConditionField(
-		weights=weights,
-		h=h,
-		t_ext=external_temperature,
-		dofs=dofs,
-		loss_matrix=loss_matrix,
-		rhs=rhs,
-	)
+	return BoundaryConditionField( weights=weights, h=h, t_ext=external_temperature, dofs=dofs, loss_matrix=loss_matrix, rhs=rhs)
 
 
-def _build_volume_loss_field(
-	m_unit: csr_matrix,
-	n_nodes: int,
-	general_loss: float,
-	vent_loss: float,
-	radiation_loss: float,
-	t_ext: float,
-) -> VolumeLossField:
+def _build_volume_loss_field(m_unit: csr_matrix, n_nodes: int, general_loss: float, vent_loss: float, radiation_loss: float, t_ext: float) -> VolumeLossField:
+	"""
+	Helper construisant le champ de perte de chaleur volumique
+
+	param: m_unit: matrice de masse unitaire pour le maillage
+	param: n_nodes: nombre de noeuds dans le maillage
+	param: general_loss: coefficient de perte de chaleur générale (ex: diffusion vers l'extérieur)
+	param: vent_loss: coefficient de perte de chaleur par ventilation (ex: diffusion sol->mur
+	param: radiation_loss: coefficient de perte de chaleur par rayonnement
+	param: t_ext: température extérieure pour les pertes de chaleur convectives et radiatives
+	return: VolumeLossField
+	"""
 	linear_coeff = max(0.0, float(general_loss)) + max(0.0, float(vent_loss))
 	ambient = np.full(n_nodes, float(t_ext), dtype=float)
 	loss_matrix = (linear_coeff * m_unit).tocsr()
 	rhs = linear_coeff * m_unit.dot(ambient)
-	return VolumeLossField(
-		linear_coeff=linear_coeff,
-		radiation_coeff=max(0.0, float(radiation_loss)),
-		t_ext=float(t_ext),
-		loss_matrix=loss_matrix,
-		rhs=np.asarray(rhs, dtype=float),
-	)
+	return VolumeLossField(linear_coeff=linear_coeff, radiation_coeff=max(0.0, float(radiation_loss)), t_ext=float(t_ext), loss_matrix=loss_matrix, rhs=np.asarray(rhs, dtype=float))
 
 
-def _radiation_loss_rhs(m_unit: csr_matrix, local_t: np.ndarray, volume_loss: VolumeLossField) -> np.ndarray:
+def _radiation_loss_rhs(m_unit: csr_matrix, local_t: np.ndarray, volume_loss: VolumeLossField) -> np.ndarray: # calcul
+	"""
+	helper calcul du terme source de perte de chaleur par rayonnement
+
+	param: m_unit: matrice de masse unitaire pour le maillage
+	param: local_t: tableau des températures locales par élément
+	param: volume_loss: VolumeLossField contenant les informations nécessaires pour calculer la perte de chaleur
+	return: tableau du terme source de perte de chaleur par rayonnement à appliquer au système
+	"""
 	if volume_loss.radiation_coeff <= 0.0:
 		return np.zeros_like(local_t)
 	radiation_t = np.clip(local_t, 0.0, 5000.0)
@@ -781,8 +736,15 @@ def _radiation_loss_rhs(m_unit: csr_matrix, local_t: np.ndarray, volume_loss: Vo
 	return np.asarray(m_unit.dot(power_density), dtype=float)
 
 
-def _heat_release_rate(material: dict[str, object], elem_temp: float, burn_age: float) -> float:
-	_ = elem_temp
+def _heat_release_rate(material: dict[str, object], elem_temp: float, burn_age: float) -> float: # calcul
+	"""
+	Calcul la cheleur émise par un élément brulé 
+
+	param: material: dictionnaire contenant les propriétés du matériau de l'élément
+	param: elem_temp: température de l'élément
+	param: burn_age: temps écoulé depuis que l'élément a commencé à brûler
+	return: taux de libération de chaleur de l'élément
+	"""
 	peak_hrr = max(0.0, float(material.get("hrr", 0.0)))
 	duration = max(0.0, float(material.get("hrr_duration", 0.0)))
 	if peak_hrr <= 0.0 or duration <= 0.0 or burn_age >= duration:
@@ -797,16 +759,20 @@ def _heat_release_rate(material: dict[str, object], elem_temp: float, burn_age: 
 	return peak_hrr * max(0.0, (duration - burn_age) / max(duration - decay_start, 1e-12))
 
 
-def _hrr_source_rhs(
-	system: ElementwiseSystem,
-	elems: np.ndarray,
-	burned_elements: np.ndarray,
-	local_t: np.ndarray,
-	burn_times: np.ndarray,
-	sim_time: float,
-	vertical_transfer: VerticalHeatTransferField | None = None,
-	vertical_attenuation: float = 0.25,
-) -> np.ndarray:
+def _hrr_source_rhs(system: ElementwiseSystem, elems: np.ndarray, burned_elements: np.ndarray, local_t: np.ndarray, burn_times: np.ndarray,csim_time: float,vertical_transfer: VerticalHeatTransferField | None = None,vertical_attenuation: float = 0.25) -> np.ndarray: # calcul
+	"""
+	Calcul le terme source de perte de chaleur par libération de chaleur
+
+	param: system: ElementwiseSystem contenant les matrices et champs à utiliser pour le calcul
+	param: elems: tableau des éléments du maillage
+	param: burned_elements: tableau booléen indiquant quels éléments sont brûlés
+	param: local_t: tableau des températures locales par élément
+	param: burn_times: tableau des temps de combustion par élément
+	param: csim_time: temps actuel de la simulation
+	param: vertical_transfer: VerticalHeatTransferField contenant les informations pour le transfert de chaleur vertical, ou None si désactivé
+	param: vertical_attenuation: coefficient d'atténuation de la chaleur pour le transfert de chaleur vertical
+	return: tableau du terme source de libération de chaleur
+	"""
 	burned_indices = np.flatnonzero(burned_elements)
 	if len(burned_indices) == 0:
 		return np.zeros(system.m_mat.shape[0], dtype=float)
@@ -816,7 +782,7 @@ def _hrr_source_rhs(
 	vertical_load_by_element: dict[int, np.ndarray] = {}
 	for local_idx, elem_idx in enumerate(burned_indices):
 		material = get_material(str(system.elem_material_names[int(elem_idx)]))
-		burn_age = max(0.0, sim_time - float(burn_times[int(elem_idx)]))
+		burn_age = max(0.0, csim_time - float(burn_times[int(elem_idx)]))
 		hrr = _heat_release_rate(material, float(elem_temperatures[local_idx]), burn_age)
 		local_loads[local_idx] = hrr * system.unit_load_local[int(elem_idx)]
 
@@ -841,13 +807,17 @@ def _hrr_source_rhs(
 	return rhs
 
 
-def _update_burned_elements(
-	burned_elements: np.ndarray,
-	elems: np.ndarray,
-	local_t: np.ndarray,
-	elem_tc: np.ndarray,
-	active_elements: np.ndarray | None = None,
-) -> np.ndarray:
+def _update_burned_elements(burned_elements: np.ndarray, elems: np.ndarray, local_t: np.ndarray, elem_tc: np.ndarray, active_elements: np.ndarray | None = None ) -> np.ndarray: # calcul
+	"""
+	Update les éléments brulés
+
+	param: burned_elements: tableau booléen indiquant quels éléments sont brûlés
+	param: elems: tableau des éléments du maillage
+	param: local_t: tableau des températures locales par élément
+	param: elem_tc: tableau des températures de combustion par élément
+	param: active_elements: tableau booléen indiquant quels éléments sont actuellement actifs, ou None pour ignorer cette condition
+	return: tableau des indices des éléments qui viennent de brûler 
+	"""
 	candidates = ~burned_elements
 	if active_elements is not None:
 		candidates &= active_elements
@@ -861,16 +831,20 @@ def _update_burned_elements(
 	return newly_burned
 
 
-def _update_element_activity(
-	active_elements: np.ndarray,
-	idle_steps: np.ndarray,
-	burned_elements: np.ndarray,
-	elems: np.ndarray,
-	local_t: np.ndarray,
-	elem_tc: np.ndarray,
-	freeze_steps: int,
-	temp_margin: float,
-) -> tuple[int, int]:
+def _update_element_activity(active_elements: np.ndarray, idle_steps: np.ndarray, burned_elements: np.ndarray, elems: np.ndarray, local_t: np.ndarray, elem_tc: np.ndarray, freeze_steps: int, temp_margin: float) -> tuple[int, int]: # opti
+	"""
+	Update les éléments actifs en fonction de leur température et de leur temps d'inactivité
+
+	param: active_elements: tableau booléen indiquant quels éléments sont actuellement actifs
+	param: idle_steps: tableau des nombres de pas d'inactivité par élément
+	param: burned_elements: tableau booléen indiquant quels éléments sont brûlés
+	param: elems: tableau des éléments du maillage
+	param: local_t: tableau des températures locales par élément
+	param: elem_tc: tableau des températures de combustion par élément
+	param: freeze_steps: nombre de pas d'inactivité avant de geler un élément
+	param: temp_margin: marge de température pour considérer un élément comme froid
+	return: tuple (n_checked, n_frozen) indiquant le nombre d'éléments vérifiés et le nombre d'éléments qui viennent d'être gelés
+	"""
 	if freeze_steps <= 0:
 		active_elements[:] = True
 		idle_steps[:] = 0
@@ -890,17 +864,20 @@ def _update_element_activity(
 	active_elements[to_freeze] = False
 	return len(check_indices), int(len(to_freeze))
 
+def _reactivate_near_hot_nodes(active_elements: np.ndarray, idle_steps: np.ndarray, burned_elements: np.ndarray, elems: np.ndarray, local_t: np.ndarray, elem_tc: np.ndarray,temp_margin: float) -> int: #opti
+	"""
+	Update les éléments inactifs en les réactivant s'ils sont proches d'éléments chauds
 
-def _reactivate_near_hot_nodes(
-	active_elements: np.ndarray,
-	idle_steps: np.ndarray,
-	burned_elements: np.ndarray,
-	elems: np.ndarray,
-	local_t: np.ndarray,
-	elem_tc: np.ndarray,
-	temp_margin: float,
-) -> int:
-	inactive = (~active_elements) & (~burned_elements)
+	param: active_elements: tableau booléen indiquant quels éléments sont actuellement actifs
+	param: idle_steps: tableau des nombres de pas d'inactivité par élément
+	param: burned_elements: tableau booléen indiquant quels éléments sont brûlés
+	param: elems: tableau des éléments du maillage
+	param: local_t: tableau des températures locales par élément
+	param: elem_tc: tableau des températures de combustion par élément
+	param: temp_margin: marge de température pour considérer un élément comme chaud
+	return: nombre d'éléments qui viennent d'être réactivés
+	"""
+	inactive = (~active_elements) & (~burned_elements) # Seuls les éléments inactifs et non brûlés peuvent être réactivés
 	if not np.any(inactive):
 		return 0
 
@@ -911,8 +888,14 @@ def _reactivate_near_hot_nodes(
 	idle_steps[to_reactivate] = 0
 	return int(len(to_reactivate))
 
+def _build_node_neighbors(elems: np.ndarray, n_nodes: int) -> list[np.ndarray]: #opti
+	"""
+	Helper construisant la liste des voisins de chaque noeud à partir des éléments du maillage
 
-def _build_node_neighbors(elems: np.ndarray, n_nodes: int) -> list[np.ndarray]:
+	param: elems: tableau des éléments du maillage
+	param: n_nodes: nombre de noeuds dans le maillage
+	return: liste de tableaux contenant les indices des noeuds voisins pour chaque noeud
+	"""
 	neighbors: list[set[int]] = [set() for _ in range(n_nodes)]
 	for element in elems:
 		nodes = [int(v) for v in element]
@@ -920,16 +903,19 @@ def _build_node_neighbors(elems: np.ndarray, n_nodes: int) -> list[np.ndarray]:
 			neighbors[node].update(other for other in nodes if other != node)
 	return [np.asarray(sorted(local_neighbors), dtype=int) for local_neighbors in neighbors]
 
+def _thaw_frozen_nodes(frozen_nodes: np.ndarray, node_idle_steps: np.ndarray, node_neighbors: list[np.ndarray], local_t: np.ndarray, node_tc: np.ndarray, thaw_delta: float, thaw_tc_margin: float) -> int: #opti
+	"""
+	helper réactivant les noeuds gelés 
 
-def _thaw_frozen_nodes(
-	frozen_nodes: np.ndarray,
-	node_idle_steps: np.ndarray,
-	node_neighbors: list[np.ndarray],
-	local_t: np.ndarray,
-	node_tc: np.ndarray,
-	thaw_delta: float,
-	thaw_tc_margin: float,
-) -> int:
+	param: frozen_nodes: tableau booléen indiquant quels noeuds sont gelés
+	param: node_idle_steps: tableau des nombres de pas d'inactivité par noeud
+	param: node_neighbors: liste de tableaux contenant les indices des noeuds voisins pour chaque noeud
+	param: local_t: tableau des températures locales par noeud
+	param: node_tc: tableau des températures de combustion par noeud
+	param: thaw_delta: seuil de différence de température avec les voisins pour réactiver un noeud gelé
+	param: thaw_tc_margin: marge de température pour considérer un voisin comme chaud pour réactiver un noeud gelé
+	return: nombre de noeuds qui viennent d'être réactivés
+	"""
 	frozen_indices = np.flatnonzero(frozen_nodes)
 	if len(frozen_indices) == 0:
 		return 0
@@ -951,18 +937,21 @@ def _thaw_frozen_nodes(
 	node_idle_steps[thaw_indices] = 0
 	return int(len(thaw_indices))
 
+def _update_frozen_nodes(frozen_nodes: np.ndarray, node_idle_steps: np.ndarray, old_t: np.ndarray, new_t: np.ndarray, node_tc: np.ndarray, freeze_steps: int, freeze_delta: float, freeze_tc_margin: float, max_frozen_fraction: float ) -> tuple[int, int]: #opti
+	"""
+	helper mettant à jour les noeuds gelés en fonction de leur température, de leur temps d'inactivité et de la température de combustion
 
-def _update_frozen_nodes(
-	frozen_nodes: np.ndarray,
-	node_idle_steps: np.ndarray,
-	old_t: np.ndarray,
-	new_t: np.ndarray,
-	node_tc: np.ndarray,
-	freeze_steps: int,
-	freeze_delta: float,
-	freeze_tc_margin: float,
-	max_frozen_fraction: float,
-) -> tuple[int, int]:
+	param: frozen_nodes: tableau booléen indiquant quels noeuds sont gelés
+	param: node_idle_steps: tableau des nombres de pas d'inactivité par noeud
+	param: old_t: tableau des températures locales par noeud à l'étape précédente
+	param: new_t: tableau des températures locales par noeud à l'étape actuelle
+	param: node_tc: tableau des températures de combustion par noeud
+	param: freeze_steps: nombre de pas d'inactivité avant de geler un noeud
+	param: freeze_delta: seuil de différence de température avec l'étape précédente pour considérer un noeud comme stable
+	param: freeze_tc_margin: marge de température pour considérer un noeud comme froid pour le gel
+	param: max_frozen_fraction: fraction maximale de noeuds qui peuvent être gelés en même temps
+	return: tuple (n_checked, n_frozen) indiquant le nombre de noeuds vérifiés et le nombre de noeuds qui viennent d'être gelés
+	"""
 	if freeze_steps <= 0:
 		frozen_count = int(np.count_nonzero(frozen_nodes))
 		frozen_nodes[:] = False
@@ -992,27 +981,21 @@ def _update_frozen_nodes(
 	node_idle_steps[to_freeze] = 0
 	return len(candidate_indices), int(len(to_freeze))
 
+def _burned_triangle_vertices(points: np.ndarray, elems: np.ndarray, burned_elements: np.ndarray) -> list[np.ndarray]: # visuel
+	"""
+	Helper construisant la liste des coordonnées des triangles brûlés
 
-def _burned_triangle_vertices(points: np.ndarray, elems: np.ndarray, burned_elements: np.ndarray) -> list[np.ndarray]:
+	param: points: tableau des coordonnées des points du maillage
+	param: elems: tableau des éléments du maillage
+	param: burned_elements: tableau booléen indiquant quels éléments sont brûlés
+	return: liste de tableaux contenant les coordonnées des sommets de chaque triangle brûlé
+	"""
 	return [points[tri, :2] for tri in elems[burned_elements]]
 
-
-def _burned_tetra_face_vertices(points: np.ndarray, elems: np.ndarray, burned_elements: np.ndarray) -> list[np.ndarray]:
-	face_vertices: list[np.ndarray] = []
-	for tet in elems[burned_elements]:
-		i, j, k, l = [int(v) for v in tet]
-		face_vertices.extend(
-			[
-				points[[i, j, k]],
-				points[[i, j, l]],
-				points[[i, k, l]],
-				points[[j, k, l]],
-			]
-		)
-	return face_vertices
-
-
-def _burned_boundary_face_mask(boundary_faces: np.ndarray, elems: np.ndarray, burned_elements: np.ndarray) -> np.ndarray:
+def _burned_boundary_face_mask(boundary_faces: np.ndarray, elems: np.ndarray, burned_elements: np.ndarray) -> np.ndarray: # visuel
+	"""
+	Helper construisant un masque indiquant quelles faces de bord sont brûlées
+	"""
 	burned_faces: set[tuple[int, int, int]] = set()
 	for tet in elems[burned_elements]:
 		i, j, k, l = [int(v) for v in tet]
@@ -1022,27 +1005,26 @@ def _burned_boundary_face_mask(boundary_faces: np.ndarray, elems: np.ndarray, bu
 		burned_faces.add(tuple(sorted((j, k, l))))
 	return np.asarray([tuple(sorted(int(v) for v in face)) in burned_faces for face in boundary_faces], dtype=bool)
 
-
-def _burned_boundary_face_vertices(points: np.ndarray, boundary_faces: np.ndarray, elems: np.ndarray, burned_elements: np.ndarray) -> list[np.ndarray]:
+def _burned_boundary_face_vertices(points: np.ndarray, boundary_faces: np.ndarray, elems: np.ndarray, burned_elements: np.ndarray) -> list[np.ndarray]: # visuel
+	"""
+	Helper construisant la liste des coordonnées des faces frontières brûlées
+	"""
 	mask = _burned_boundary_face_mask(boundary_faces, elems, burned_elements)
 	return [points[face] for face in boundary_faces[mask]]
 
-
-def _build_region_legend_handles(regions: list[dict[str, object]]) -> list[Patch]:
+def _build_region_legend_handles(regions: list[dict[str, object]]) -> list[Patch]: # visuel
+	"""
+	Helper les legendes des régions
+	"""
 	legend_handles: list[Patch] = []
 	for region in regions:
-		legend_handles.append(
-			Patch(
-				facecolor=str(region["color"]),
-				edgecolor="black" if bool(region["solid_fill"]) else str(region["color"]),
-				alpha=0.45 if bool(region["solid_fill"]) else 0.30,
-				label=str(region["legend_label"]),
-			)
-		)
+		legend_handles.append(Patch( facecolor=str(region["color"]), edgecolor="black" if bool(region["solid_fill"]) else str(region["color"]), alpha=0.45 if bool(region["solid_fill"]) else 0.30, label=str(region["legend_label"])))
 	return legend_handles
 
-
-def _add_region_overlays_2d(ax, points: np.ndarray, elems: np.ndarray, phys_ids: np.ndarray, regions: list[dict[str, object]]):
+def _add_region_overlays_2d(ax, points: np.ndarray, elems: np.ndarray, phys_ids: np.ndarray, regions: list[dict[str, object]]): # visuel
+	"""
+	Helper ajoutant les superpositions de régions sur une visualisation 2D
+	"""
 	for region in regions:
 		mask = phys_ids == int(region["pid"])
 		if not np.any(mask):
@@ -1052,26 +1034,12 @@ def _add_region_overlays_2d(ax, points: np.ndarray, elems: np.ndarray, phys_ids:
 		alpha = 1.0 if bool(region["solid_fill"]) else float(region["overlay_alpha"])
 		linewidth = float(region["edge_width"]) if bool(region["solid_fill"]) else 0.35
 		zorder = 4 if bool(region["solid_fill"]) else 3
-		ax.add_collection(
-			PolyCollection(
-				verts,
-				facecolors=str(region["color"]),
-				edgecolors=edgecolor,
-				linewidths=linewidth,
-				alpha=alpha,
-				zorder=zorder,
-			)
-		)
+		ax.add_collection(PolyCollection(verts, facecolors=str(region["color"]), edgecolors=edgecolor, linewidths=linewidth, alpha=alpha, zorder=zorder))
 
-
-def _add_region_overlays_3d(
-	ax,
-	points: np.ndarray,
-	boundary_faces: np.ndarray,
-	boundary_phys: np.ndarray,
-	regions: list[dict[str, object]],
-	include_solid_fill: bool,
-):
+def _add_region_overlays_3d(ax, points: np.ndarray, boundary_faces: np.ndarray, boundary_phys: np.ndarray, regions: list[dict[str, object]],include_solid_fill: bool): # visuel
+	"""
+	Helper ajoutant les superpositions de régions sur une visualisation 3D
+	"""
 	collections = []
 	for region in regions:
 		mask = boundary_phys == int(region["pid"])
@@ -1079,29 +1047,17 @@ def _add_region_overlays_3d(
 			continue
 		face_vertices = [points[face] for face in boundary_faces[mask]]
 		if include_solid_fill and bool(region["solid_fill"]):
-			poly = Poly3DCollection(
-				face_vertices,
-				facecolors=str(region["color"]),
-				edgecolors="black",
-				linewidths=float(region["edge_width"]) * 0.4,
-				alpha=1.0,
-				zorder=3,
-			)
+			poly = Poly3DCollection(face_vertices, facecolors=str(region["color"]), edgecolors="black", linewidths=float(region["edge_width"]) * 0.4, alpha=1.0, zorder=3)
 		else:
-			poly = Poly3DCollection(
-				face_vertices,
-				facecolors=str(region["color"]),
-				edgecolors=str(region["color"]),
-				linewidths=0.15,
-				alpha=float(region["overlay_alpha_3d"]),
-				zorder=1,
-			)
+			poly = Poly3DCollection(face_vertices, facecolors=str(region["color"]), edgecolors=str(region["color"]), linewidths=0.15, alpha=float(region["overlay_alpha_3d"]),zorder=1,)
 		ax.add_collection3d(poly)
 		collections.append(poly)
 	return collections
 
-
-def _add_region_edges_3d(ax, points: np.ndarray, boundary_faces: np.ndarray, boundary_phys: np.ndarray, regions: list[dict[str, object]]):
+def _add_region_edges_3d(ax, points: np.ndarray, boundary_faces: np.ndarray, boundary_phys: np.ndarray, regions: list[dict[str, object]]): #visuel 
+	"""
+	helper ajoutant les arêtes des régions sur une visualisation 3D
+	"""
 	collections = []
 	for region in regions:
 		if not bool(region["solid_fill"]):
@@ -1111,18 +1067,15 @@ def _add_region_edges_3d(ax, points: np.ndarray, boundary_faces: np.ndarray, bou
 			continue
 		region_edges = _build_boundary_edges(boundary_faces[mask])
 		segments = [[points[i], points[j]] for i, j in region_edges]
-		collection = Line3DCollection(
-			segments,
-			colors="black",
-			linewidths=max(0.55, float(region["edge_width"])),
-			alpha=0.95,
-		)
+		collection = Line3DCollection(segments, colors="black", linewidths=max(0.55, float(region["edge_width"])), alpha=0.95)
 		ax.add_collection3d(collection)
 		collections.append(collection)
 	return collections
 
-
-def _build_boundary_edges(boundary_faces: np.ndarray) -> np.ndarray:
+def _build_boundary_edges(boundary_faces: np.ndarray) -> np.ndarray: # visuel
+	"""
+	Helper construisant la liste des arêtes de bord à partir des faces de bord
+	"""
 	edge_set: set[tuple[int, int]] = set()
 	for face in boundary_faces:
 		i, j, k = [int(v) for v in face]
@@ -1131,51 +1084,26 @@ def _build_boundary_edges(boundary_faces: np.ndarray) -> np.ndarray:
 		edge_set.add(tuple(sorted((j, k))))
 	return np.asarray(sorted(edge_set), dtype=int)
 
-
-def _add_source_marker_2d(ax, src_x: float, src_y: float, src_radius: float, src_temp: float):
-	marker = ax.scatter(
-		[src_x],
-		[src_y],
-		marker="X",
-		s=115,
-		c="#ff2d00",
-		edgecolors="black",
-		linewidths=0.9,
-		zorder=8,
-		label="Source: "+str(src_temp)+" K",
-	)
+def _add_source_marker_2d(ax, src_x: float, src_y: float, src_radius: float, src_temp: float): # visuel
+	"""
+	Helper ajoutant un marqueur pour la source de chaleur sur une visualisation 2D
+	"""
+	marker = ax.scatter([src_x], [src_y], marker="X", s=115, c="#ff2d00", edgecolors="black", linewidths=0.9, zorder=8, label="Source: "+str(src_temp)+" K")
 	if src_radius > 0.0:
-		ax.add_patch(
-			Circle(
-				(src_x, src_y),
-				src_radius,
-				fill=False,
-				edgecolor="#ff2d00",
-				linewidth=1.4,
-				alpha=0.85,
-				zorder=7,
-			)
-		)
+		ax.add_patch(Circle( (src_x, src_y), src_radius, fill=False, edgecolor="#ff2d00", linewidth=1.4, alpha=0.85, zorder=7))
 	return marker
 
-
-def _add_source_marker_3d(ax, src_x: float, src_y: float, src_z: float, src_temp: float):
-	return ax.scatter(
-		[src_x],
-		[src_y],
-		[src_z],
-		marker="X",
-		s=95,
-		c="#ff2d00",
-		edgecolors="black",
-		linewidths=0.8,
-		depthshade=False,
-		zorder=8,
-		label="Source: "+str(src_temp)+" K",
-	)
+def _add_source_marker_3d(ax, src_x: float, src_y: float, src_z: float, src_temp: float): #visuel
+	"""
+	Helper ajoutant un marqueur pour la source de chaleur sur une visualisation 3D
+	"""
+	return ax.scatter([src_x], [src_y], [src_z], marker="X", s=95, c="#ff2d00", edgecolors="black", linewidths=0.8, depthshade=False, zorder=8, label="Source: "+str(src_temp)+" K")
 
 
-def _plot_3d_mesh_preview(points: np.ndarray, boundary_faces: np.ndarray, title: str):
+def _plot_3d_mesh_preview(points: np.ndarray, boundary_faces: np.ndarray, title: str): # visuel
+	"""
+	Affiche le maillage 3D de l'environnement
+	"""
 	fig = plt.figure(figsize=(10, 8))
 	ax = fig.add_subplot(111, projection="3d")
 	edges = _build_boundary_edges(boundary_faces)
@@ -1190,7 +1118,10 @@ def _plot_3d_mesh_preview(points: np.ndarray, boundary_faces: np.ndarray, title:
 	return fig, ax
 
 
-def _plot_3d_filled_preview(points: np.ndarray, boundary_faces: np.ndarray, boundary_phys: np.ndarray, regions: list[dict[str, object]], title: str):
+def _plot_3d_filled_preview(points: np.ndarray, boundary_faces: np.ndarray, boundary_phys: np.ndarray, regions: list[dict[str, object]], title: str): # visuel
+	"""
+	Affiche le maillage 3D de l'environnement avec les régions remplies
+	"""
 	fig = plt.figure(figsize=(10, 8))
 	ax = fig.add_subplot(111, projection="3d")
 	_add_region_overlays_3d(ax, points, boundary_faces, boundary_phys, regions, include_solid_fill=False)
@@ -1207,7 +1138,10 @@ def _plot_3d_filled_preview(points: np.ndarray, boundary_faces: np.ndarray, boun
 	return fig, ax
 
 
-def _set_equal_3d_axes(ax, points: np.ndarray) -> None:
+def _set_equal_3d_axes(ax, points: np.ndarray) -> None: # visuel
+	"""
+	Gère l'affichage des axes
+	"""
 	mins = np.min(points, axis=0)
 	maxs = np.max(points, axis=0)
 	center = 0.5 * (mins + maxs)
@@ -1219,7 +1153,10 @@ def _set_equal_3d_axes(ax, points: np.ndarray) -> None:
 	ax.set_zlim(center[2] - radius, center[2] + radius)
 
 
-def _scenario_defaults(dim: int) -> dict[str, float | int]:
+def _scenario_defaults(dim: int) -> dict[str, float | int]: # main
+	"""
+	Centralise les données de lancement de la simulation selon la dimention, à étendre pour accepté les txt du même nom que les maillages
+	"""
 	if dim == 3:
 		return {
 			"dt": 100.0,
@@ -1263,7 +1200,10 @@ def _scenario_defaults(dim: int) -> dict[str, float | int]:
 	}
 
 
-def _resolve_save_targets(save_arg: str) -> tuple[Path, Path, Path, Path]:
+def _resolve_save_targets(save_arg: str) -> tuple[Path, Path, Path, Path]: # main
+	"""
+	Gère les chemins de sauvegarde
+	"""
 	save_path = Path(save_arg)
 	if save_path.suffix:
 		output_dir = save_path.parent / save_path.stem
@@ -1276,7 +1216,10 @@ def _resolve_save_targets(save_arg: str) -> tuple[Path, Path, Path, Path]:
 	return output_dir, animation_path, setup_png_path, timings_csv_path
 
 
-def _write_timings_csv(csv_path: Path, timing_rows: list[dict[str, object]]) -> None:
+def _write_timings_csv(csv_path: Path, timing_rows: list[dict[str, object]]) -> None: # main
+	"""
+	Sauve les données de performance temporel
+	"""
 	fieldnames = ["phase", "seconds", "frame", "details"]
 	with csv_path.open("w", newline="", encoding="utf-8") as fh:
 		writer = csv.DictWriter(fh, fieldnames=fieldnames)
@@ -1285,7 +1228,10 @@ def _write_timings_csv(csv_path: Path, timing_rows: list[dict[str, object]]) -> 
 			writer.writerow(row)
 
 
-def run(args: argparse.Namespace):
+def run(args: argparse.Namespace): # main
+	"""
+	Gère le lancement de la simulation
+	"""
 	if not args.plot:
 		plt.switch_backend("Agg")
 
@@ -1339,7 +1285,7 @@ def run(args: argparse.Namespace):
 	print(f"Using mesh: {mesh_path}")
 
 	t0 = time.perf_counter()
-	pts, elems, phys, phys_name_map, dim = _load_mesh_data(mesh_path, dim)
+	pts, elems, phys, phys_name_map, dim = load_mesh_data(mesh_path, dim)
 	record_timing("mesh_load", time.perf_counter() - t0, details=f"{mesh_path};dim={dim}")
 	print(f"Maillage charge: {len(pts)} noeuds, {len(elems)} elements ({dim}D).")
 
@@ -1769,7 +1715,7 @@ def run(args: argparse.Namespace):
 		plt.show()
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser() -> argparse.ArgumentParser: # terminal
 	parser = argparse.ArgumentParser(description="Simulation FEM diffusion-reaction 2D/3D")
 	parser.add_argument("--mesh", type=str, default=None, help="Nom du maillage .msh dans models/")
 	parser.add_argument("--dt", type=float, default=None, help="Pas de temps")
@@ -1809,7 +1755,7 @@ def build_parser() -> argparse.ArgumentParser:
 	return parser
 
 
-def main() -> None:
+def main() -> None: # main lui-même
 	parser = build_parser()
 	args = parser.parse_args()
 	if args.mesh is None:
@@ -1817,5 +1763,5 @@ def main() -> None:
 	run(args)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__": #BOOM
 	main()

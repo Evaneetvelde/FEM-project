@@ -1,6 +1,6 @@
 # Projet FEM - diffusion-reaction thermique 2D/3D
 
-Ce projet simule la propagation de chaleur dans un domaine 2D ou 3D par elements finis. Il gere plusieurs materiaux, une source chaude initiale, l'allumage des elements combustibles, des pertes thermiques simplifiees, un transport vertical simplifie en 3D, et une visualisation animee.
+Ce projet simule la propagation de chaleur dans un domaine 2D ou 3D solide par elements finis. Il gere plusieurs materiaux, une source chaude initiale, l'allumage des elements combustibles, des pertes thermiques simplifiees, un transport vertical simplifie en 3D, et une visualisation animee.
 
 Le point d'entree de reference est `main.py`. C'est la version optimisee actuelle.
 
