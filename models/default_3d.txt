@@ -1,0 +1,27 @@
+# Scenario par defaut 3D
+dt=100.0
+steps=400
+sub_steps=1
+theta=1.0
+h_conv=50.0
+general_loss=4.0
+vent_loss=15.0
+radiation_loss=5.0e-8
+vertical_air_transfer=1
+vertical_air_attenuation=0.25
+vertical_air_radius=0.0
+vertical_air_random_delta=0.2
+horizontal_air_transfer=1
+horizontal_air_attenuation=0.35
+horizontal_air_radius=0.0
+horizontal_air_power_fraction=0.35
+horizontal_air_random_delta=0.15
+structural_fun=0
+structural_fun_radius=0.0
+structural_fun_load_factor=1.0
+t_amb=293.0
+src_temp=800.0
+src_x=0.0
+src_y=0.0
+src_z=0.0
+src_radius=1.0

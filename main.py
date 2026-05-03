@@ -29,9 +29,10 @@ from calculs.dirichlet import precompute_dirichlet_dofs, theta_step_fast
 from calculs.mass import assemble_mass_from_preassembled, preassemble_mass_unit
 from calculs.stiffness import assemble_stiffness_from_preassembled, preassemble_stiffness_unit
 from materialsbank import get_burn_material_name, get_material, get_material_color, get_material_overlay_alpha
+from structural_fun import prepare_structural_fun, update_structural_fun
 
 PHYSICAL_ID_MAP = { # lien id mesh -> materiau
-	1: "bois",
+	1: "bois", 
 	2: "beton",
 	3: "verre",
 	4: "isolation",
@@ -39,14 +40,17 @@ PHYSICAL_ID_MAP = { # lien id mesh -> materiau
 	6: "metal",
 	7: "meche",
 	8: "explosif",
+	9: "viande",
+	10: "vegetation",
 }
 
 ROLE_KEYWORDS = { # lien materiau -> role dans la visualisation
-	"wall": {"mur", "murs", "wall", "walls"},
+	"wall": {"mur", "murs", "wall", "walls", "beton"},
 	"window": {"fenetre", "fenetres", "window", "windows", "glass", "verre"},
 	"floor": {"sol", "floor", "slab", "dalle"},
 	"door": {"porte", "portes", "door", "doors"},
 	"column": {"colonne", "colonnes", "column", "columns", "pillar", "pillars"},
+	"vegetation": {"vegetation", "vegetal", "plante", "plantes", "tree", "trees"},
 }
 
 THERMAL_CMAP = LinearSegmentedColormap.from_list( # lien temperature -> couleur 2D
@@ -70,7 +74,7 @@ THERMAL_CMAP_3D = LinearSegmentedColormap.from_list( # lien temperature -> coule
 	N=256,
 )
 THERMAL_3D_VMIN = 200.0 # pour cap les valeurs lors du débuggages des anomalies
-THERMAL_3D_VMAX = 10000.0
+THERMAL_3D_VMAX = 1500.0
 
 
 @dataclass
@@ -125,6 +129,15 @@ class VerticalHeatTransferField: # class simplification transfert de chaleur ver
 	targets: list[np.ndarray]
 	dz: list[np.ndarray]
 	element_volumes: np.ndarray
+
+
+@dataclass
+class HorizontalAirTransferField: # class simplification mouvements d'air horizontaux
+	enabled: bool
+	targets: list[np.ndarray]
+	distances: list[np.ndarray]
+	element_volumes: np.ndarray
+	power_fraction: float
 
 
 def _physical_id_to_name_map(msh: meshio.Mesh, dim: int) -> dict[int, str]: #visuel 
@@ -210,6 +223,8 @@ def load_mesh_data(mesh_path: Path, dim: int) -> tuple[np.ndarray, np.ndarray, n
 	param: dim: dimension souhaitée (2 ou 3), auto-détectée si les éléments du type demandé sont absents
 	return: tuple contenant les points, les éléments, les ids physiques, le mapping id->nom physique et la dimension finale utilisée
 	"""
+	if not mesh_path.exists() or mesh_path.stat().st_size < 100:
+		raise FileNotFoundError(f"Le maillage {mesh_path} est introuvable, vide ou corrompu. Verifiez qu'il a bien ete genere en 3D.")
 	msh = meshio.read(str(mesh_path))
 	cell_type = "triangle" if dim == 2 else "tetra"
 	elems = np.asarray(msh.cells_dict.get(cell_type, np.array([], dtype=int)), dtype=int)
@@ -492,6 +507,18 @@ def _default_vertical_air_radius(points: np.ndarray, elems: np.ndarray) -> float
 	area = max(float(spans[0] * spans[1]), 1e-12)
 	return 1.5 * float(np.sqrt(area / max(len(elems), 1)))
 
+
+def _default_horizontal_air_radius(points: np.ndarray, elems: np.ndarray, dim: int) -> float: # calcul
+	"""
+	Simule le rayon d'action horizontal des mouvements d'air en 2D/3D.
+	"""
+	centroids = np.mean(points[elems], axis=1)
+	horizontal = centroids[:, :2] if dim == 3 else centroids[:, :dim]
+	spans = np.ptp(horizontal, axis=0)
+	area = max(float(np.prod(np.maximum(spans, 1e-12))), 1e-12)
+	return 2.0 * float(np.sqrt(area / max(len(elems), 1)))
+
+
 def _build_vertical_heat_transfer_field(points: np.ndarray, elems: np.ndarray, unit_load_local: np.ndarray, dim: int, enabled: bool, attenuation_per_m: float, horizontal_radius: float) -> VerticalHeatTransferField: # calcul
 	"""
 	Construit le champ de transfert de chaleur vertical
@@ -525,6 +552,33 @@ def _build_vertical_heat_transfer_field(points: np.ndarray, elems: np.ndarray, u
 		dz_by_source.append(dz[mask][valid])
 
 	return VerticalHeatTransferField(True, targets, dz_by_source, element_volumes)
+
+
+def _build_horizontal_air_transfer_field(points: np.ndarray, elems: np.ndarray, unit_load_local: np.ndarray, dim: int, enabled: bool, attenuation_per_m: float, radius: float, power_fraction: float) -> HorizontalAirTransferField: # calcul
+	"""
+	Construit le champ de transfert horizontal de chaleur favorise par les mouvements d'air.
+	"""
+	element_volumes = np.sum(unit_load_local, axis=1)
+	if not enabled:
+		return HorizontalAirTransferField(False, [], [], element_volumes, 0.0)
+
+	centroids = np.mean(points[elems], axis=1)
+	horizontal = centroids[:, :2] if dim == 3 else centroids[:, :dim]
+	effective_radius = float(radius) if radius > 0.0 else _default_horizontal_air_radius(points, elems, dim)
+	attenuation = max(0.0, float(attenuation_per_m))
+	targets: list[np.ndarray] = []
+	distances_by_source: list[np.ndarray] = []
+
+	for source_idx, source_center in enumerate(horizontal):
+		distances = np.linalg.norm(horizontal - source_center, axis=1)
+		mask = (distances > 0.0) & (distances <= effective_radius)
+		local_factors = np.maximum(0.0, 1.0 - attenuation * distances[mask])
+		valid = local_factors > 0.0
+		targets.append(np.flatnonzero(mask)[valid])
+		distances_by_source.append(distances[mask][valid])
+
+	return HorizontalAirTransferField(True, targets, distances_by_source, element_volumes, max(0.0, float(power_fraction)))
+
 
 def _assemble_elementwise_system(points: np.ndarray, elems: np.ndarray, phys_ids: np.ndarray, phys_name_map: dict[int, str], dim: int ) -> ElementwiseSystem: # calcul
 	"""
@@ -759,7 +813,7 @@ def _heat_release_rate(material: dict[str, object], elem_temp: float, burn_age: 
 	return peak_hrr * max(0.0, (duration - burn_age) / max(duration - decay_start, 1e-12))
 
 
-def _hrr_source_rhs(system: ElementwiseSystem, elems: np.ndarray, burned_elements: np.ndarray, local_t: np.ndarray, burn_times: np.ndarray,csim_time: float,vertical_transfer: VerticalHeatTransferField | None = None,vertical_attenuation: float = 0.25) -> np.ndarray: # calcul
+def _hrr_source_rhs(system: ElementwiseSystem, elems: np.ndarray, burned_elements: np.ndarray, local_t: np.ndarray, burn_times: np.ndarray,csim_time: float,vertical_transfer: VerticalHeatTransferField | None = None,vertical_attenuation: float = 0.25,horizontal_transfer: HorizontalAirTransferField | None = None,horizontal_attenuation: float = 0.25) -> np.ndarray: # calcul
 	"""
 	Calcul le terme source de perte de chaleur par libération de chaleur
 
@@ -780,6 +834,7 @@ def _hrr_source_rhs(system: ElementwiseSystem, elems: np.ndarray, burned_element
 	elem_temperatures = np.mean(local_t[elems[burned_indices]], axis=1)
 	local_loads = np.zeros((len(burned_indices), elems.shape[1]), dtype=float)
 	vertical_load_by_element: dict[int, np.ndarray] = {}
+	horizontal_load_by_element: dict[int, np.ndarray] = {}
 	for local_idx, elem_idx in enumerate(burned_indices):
 		material = get_material(str(system.elem_material_names[int(elem_idx)]))
 		burn_age = max(0.0, csim_time - float(burn_times[int(elem_idx)]))
@@ -788,21 +843,64 @@ def _hrr_source_rhs(system: ElementwiseSystem, elems: np.ndarray, burned_element
 
 		if vertical_transfer is not None and vertical_transfer.enabled and hrr > 0.0:
 			source_power = hrr * float(vertical_transfer.element_volumes[int(elem_idx)])
-			for target_idx, dz in zip(vertical_transfer.targets[int(elem_idx)], vertical_transfer.dz[int(elem_idx)], strict=False):
-				factor = max(0.0, 1.0 - max(0.0, float(vertical_attenuation)) * float(dz))
+			target_indices = vertical_transfer.targets[int(elem_idx)]
+			target_dz = vertical_transfer.dz[int(elem_idx)]
+			factors = np.asarray(
+				[max(0.0, 1.0 - max(0.0, float(vertical_attenuation)) * float(dz)) for dz in target_dz],
+				dtype=float,
+			)
+			total_factor = float(np.sum(factors))
+			if total_factor > 0.0:
+				# Evite de dupliquer la puissance quand plusieurs cellules au-dessus sont ciblees.
+				vertical_power = source_power * min(1.0, total_factor)
+				for target_idx, factor in zip(target_indices, factors, strict=False):
+					if factor <= 0.0:
+						continue
+					target_volume = max(float(vertical_transfer.element_volumes[int(target_idx)]), 1e-12)
+					target_power = vertical_power * factor / total_factor
+					target_load = target_power * system.unit_load_local[int(target_idx)] / target_volume
+					if int(target_idx) in vertical_load_by_element:
+						vertical_load_by_element[int(target_idx)] += target_load
+					else:
+						vertical_load_by_element[int(target_idx)] = target_load.copy()
+
+		if horizontal_transfer is not None and horizontal_transfer.enabled and hrr > 0.0 and horizontal_transfer.power_fraction > 0.0:
+			source_power = hrr * float(horizontal_transfer.element_volumes[int(elem_idx)])
+			target_indices = horizontal_transfer.targets[int(elem_idx)]
+			target_distances = horizontal_transfer.distances[int(elem_idx)]
+			if len(target_indices) == 0:
+				continue
+			unburned_mask = ~burned_elements[target_indices]
+			target_indices = target_indices[unburned_mask]
+			target_distances = target_distances[unburned_mask]
+			factors = np.asarray(
+				[max(0.0, 1.0 - max(0.0, float(horizontal_attenuation)) * float(distance)) for distance in target_distances],
+				dtype=float,
+			)
+			total_factor = float(np.sum(factors))
+			if total_factor <= 0.0:
+				continue
+			# Les mouvements d'air redistribuent une part plafonnee de la puissance sans la dupliquer.
+			horizontal_power = source_power * min(horizontal_transfer.power_fraction, total_factor)
+			for target_idx, factor in zip(target_indices, factors, strict=False):
 				if factor <= 0.0:
 					continue
-				target_volume = max(float(vertical_transfer.element_volumes[int(target_idx)]), 1e-12)
-				target_load = source_power * factor * system.unit_load_local[int(target_idx)] / target_volume
-				if int(target_idx) in vertical_load_by_element:
-					vertical_load_by_element[int(target_idx)] += target_load
+				target_volume = max(float(horizontal_transfer.element_volumes[int(target_idx)]), 1e-12)
+				target_power = horizontal_power * factor / total_factor
+				target_load = target_power * system.unit_load_local[int(target_idx)] / target_volume
+				if int(target_idx) in horizontal_load_by_element:
+					horizontal_load_by_element[int(target_idx)] += target_load
 				else:
-					vertical_load_by_element[int(target_idx)] = target_load.copy()
+					horizontal_load_by_element[int(target_idx)] = target_load.copy()
 
 	rhs = _assemble_vector_from_local(elems[burned_indices], local_loads, system.m_mat.shape[0])
 	if vertical_load_by_element:
 		target_indices = np.asarray(list(vertical_load_by_element.keys()), dtype=int)
 		target_loads = np.asarray([vertical_load_by_element[int(idx)] for idx in target_indices], dtype=float)
+		rhs += _assemble_vector_from_local(elems[target_indices], target_loads, system.m_mat.shape[0])
+	if horizontal_load_by_element:
+		target_indices = np.asarray(list(horizontal_load_by_element.keys()), dtype=int)
+		target_loads = np.asarray([horizontal_load_by_element[int(idx)] for idx in target_indices], dtype=float)
 		rhs += _assemble_vector_from_local(elems[target_indices], target_loads, system.m_mat.shape[0])
 	return rhs
 
@@ -1047,7 +1145,7 @@ def _add_region_overlays_3d(ax, points: np.ndarray, boundary_faces: np.ndarray, 
 			continue
 		face_vertices = [points[face] for face in boundary_faces[mask]]
 		if include_solid_fill and bool(region["solid_fill"]):
-			poly = Poly3DCollection(face_vertices, facecolors=str(region["color"]), edgecolors="black", linewidths=float(region["edge_width"]) * 0.4, alpha=1.0, zorder=3)
+			poly = Poly3DCollection(face_vertices, facecolors=str(region["color"]), edgecolors="black", linewidths=float(region["edge_width"]) * 0.4, alpha=float(region["overlay_alpha_3d"]), zorder=3)
 		else:
 			poly = Poly3DCollection(face_vertices, facecolors=str(region["color"]), edgecolors=str(region["color"]), linewidths=0.15, alpha=float(region["overlay_alpha_3d"]),zorder=1,)
 		ax.add_collection3d(poly)
@@ -1163,19 +1261,27 @@ def _scenario_defaults(dim: int) -> dict[str, float | int]: # main
 			"steps": 400,
 			"sub_steps": 1,
 			"theta": 1.0,
-			"h_conv": 10.0,
-			"general_loss": 0.2,
-			"vent_loss": 1.0,
+			"h_conv": 50.0,
+			"general_loss": 4.0,
+			"vent_loss": 15.0,
 			"radiation_loss": 5.0e-8,
 			"vertical_air_transfer": 1,
 			"vertical_air_attenuation": 0.25,
 			"vertical_air_radius": 0.0,
 			"vertical_air_random_delta": 0.2,
+			"horizontal_air_transfer": 1,
+			"horizontal_air_attenuation": 0.35,
+			"horizontal_air_radius": 0.0,
+			"horizontal_air_power_fraction": 0.35,
+			"horizontal_air_random_delta": 0.15,
+			"structural_fun": 0,
+			"structural_fun_radius": 0.0,
+			"structural_fun_load_factor": 1.0,
 			"t_amb": 293.0,
 			"src_temp": 800.0,
 			"src_x": 0.0,
 			"src_y": 0.0,
-			"src_z": 0.5,
+			"src_z": 0.0,
 			"src_radius": 1.0,
 		}
 	return {
@@ -1183,21 +1289,84 @@ def _scenario_defaults(dim: int) -> dict[str, float | int]: # main
 		"steps": 2000,
 		"sub_steps": 1,
 		"theta": 1.0,
-		"h_conv": 10.0,
-		"general_loss": 0.2,
-		"vent_loss": 1.0,
+		"h_conv": 50.0,
+		"general_loss": 4.0,
+		"vent_loss": 15.0,
 		"radiation_loss": 5.0e-8,
 		"vertical_air_transfer": 0,
 		"vertical_air_attenuation": 0.25,
 		"vertical_air_radius": 0.0,
 		"vertical_air_random_delta": 0.0,
+		"horizontal_air_transfer": 1,
+		"horizontal_air_attenuation": 0.35,
+		"horizontal_air_radius": 0.0,
+		"horizontal_air_power_fraction": 0.35,
+		"horizontal_air_random_delta": 0.15,
+		"structural_fun": 0,
+		"structural_fun_radius": 0.0,
+		"structural_fun_load_factor": 1.0,
 		"t_amb": 293.0,
 		"src_temp": 800.0,
-		"src_x": 1.3,
+		"src_x": 0.3,
 		"src_y": 0.0,
 		"src_z": 0.0,
 		"src_radius": 0.05,
 	}
+
+
+def _parse_scenario_value(raw_value: str) -> float | int:
+	value = raw_value.split("#", 1)[0].strip()
+	if not value:
+		raise ValueError("valeur de scenario vide")
+	lower = value.lower()
+	if lower in {"true", "yes", "on"}:
+		return 1
+	if lower in {"false", "no", "off"}:
+		return 0
+	try:
+		if any(marker in value for marker in (".", "e", "E")):
+			return float(value)
+		return int(value)
+	except ValueError:
+		return float(value)
+
+
+def _read_scenario_file(scenario_path: Path, allowed_keys: set[str]) -> dict[str, float | int]:
+	values: dict[str, float | int] = {}
+	for lineno, raw_line in enumerate(scenario_path.read_text(encoding="utf-8").splitlines(), start=1):
+		line = raw_line.strip()
+		if not line or line.startswith("#"):
+			continue
+		separator = "=" if "=" in line else ":" if ":" in line else None
+		if separator is None:
+			raise ValueError(f"{scenario_path}:{lineno}: utilisez key=value")
+		key, raw_value = line.split(separator, 1)
+		key = key.strip().replace("-", "_")
+		if key not in allowed_keys:
+			raise ValueError(f"{scenario_path}:{lineno}: parametre inconnu '{key}'")
+		values[key] = _parse_scenario_value(raw_value)
+	return values
+
+
+def _scenario_txt_candidates(mesh_path: Path, dim: int) -> list[Path]:
+	default_path = PROJECT_ROOT / "models" / f"default_{dim}d.txt"
+	candidates = [mesh_path.with_suffix(".txt")]
+	models_named_path = PROJECT_ROOT / "models" / f"{mesh_path.stem}.txt"
+	if models_named_path not in candidates:
+		candidates.append(models_named_path)
+	candidates.append(default_path)
+	return candidates
+
+
+def _load_scenario_defaults(dim: int, mesh_path: Path) -> tuple[dict[str, float | int], Path | None]:
+	defaults = _scenario_defaults(dim)
+	allowed_keys = set(defaults)
+	for scenario_path in _scenario_txt_candidates(mesh_path, dim):
+		if scenario_path.exists():
+			file_values = _read_scenario_file(scenario_path, allowed_keys)
+			defaults.update(file_values)
+			return defaults, scenario_path
+	return defaults, None
 
 
 def _resolve_save_targets(save_arg: str) -> tuple[Path, Path, Path, Path]: # main
@@ -1236,7 +1405,13 @@ def run(args: argparse.Namespace): # main
 		plt.switch_backend("Agg")
 
 	dim = int(args.dim)
-	defaults = _scenario_defaults(dim)
+	mesh_file = args.mesh or ("piece.msh" if dim == 2 else "immeuble.msh")
+	base_dir = PROJECT_ROOT
+	# Priorite au dossier models/ pour eviter les conflits avec des fichiers locaux vides
+	mesh_path = base_dir / "models" / Path(mesh_file).name
+	if not mesh_path.exists():
+		mesh_path = Path(mesh_file)
+	defaults, scenario_path = _load_scenario_defaults(dim, mesh_path)
 	dt = float(args.dt if args.dt is not None else defaults["dt"])
 	steps = int(args.steps if args.steps is not None else defaults["steps"])
 	sub_steps = max(1, int(args.sub_steps if args.sub_steps is not None else defaults["sub_steps"]))
@@ -1249,6 +1424,14 @@ def run(args: argparse.Namespace): # main
 	vertical_air_attenuation = float(args.vertical_air_attenuation if args.vertical_air_attenuation is not None else defaults["vertical_air_attenuation"])
 	vertical_air_radius = float(args.vertical_air_radius if args.vertical_air_radius is not None else defaults["vertical_air_radius"])
 	vertical_air_random_delta = max(0.0, float(args.vertical_air_random_delta if args.vertical_air_random_delta is not None else defaults["vertical_air_random_delta"]))
+	horizontal_air_transfer = bool(args.horizontal_air_transfer if args.horizontal_air_transfer is not None else defaults["horizontal_air_transfer"])
+	horizontal_air_attenuation = float(args.horizontal_air_attenuation if args.horizontal_air_attenuation is not None else defaults["horizontal_air_attenuation"])
+	horizontal_air_radius = float(args.horizontal_air_radius if args.horizontal_air_radius is not None else defaults["horizontal_air_radius"])
+	horizontal_air_power_fraction = max(0.0, float(args.horizontal_air_power_fraction if args.horizontal_air_power_fraction is not None else defaults["horizontal_air_power_fraction"]))
+	horizontal_air_random_delta = max(0.0, float(args.horizontal_air_random_delta if args.horizontal_air_random_delta is not None else defaults["horizontal_air_random_delta"]))
+	structural_fun_enabled = bool(args.structural_fun if args.structural_fun is not None else defaults["structural_fun"])
+	structural_fun_radius = max(0.0, float(args.structural_fun_radius if args.structural_fun_radius is not None else defaults["structural_fun_radius"]))
+	structural_fun_load_factor = max(0.0, float(args.structural_fun_load_factor if args.structural_fun_load_factor is not None else defaults["structural_fun_load_factor"]))
 	t_amb = float(args.t_amb if args.t_amb is not None else defaults["t_amb"])
 	src_temp = float(args.src_temp if args.src_temp is not None else defaults["src_temp"])
 	src_x = float(args.src_x if args.src_x is not None else defaults["src_x"])
@@ -1276,13 +1459,8 @@ def run(args: argparse.Namespace): # main
 			}
 		)
 
-	mesh_file = args.mesh or ("piece.msh" if dim == 2 else "immeuble.msh")
-	base_dir = PROJECT_ROOT
-	mesh_path = Path(mesh_file)
-	if not mesh_path.exists():
-		candidate = base_dir / mesh_file
-		mesh_path = candidate if candidate.exists() else base_dir / "models" / mesh_file
 	print(f"Using mesh: {mesh_path}")
+	print(f"Using scenario: {scenario_path if scenario_path is not None else 'built-in fallback'}")
 
 	t0 = time.perf_counter()
 	pts, elems, phys, phys_name_map, dim = load_mesh_data(mesh_path, dim)
@@ -1301,6 +1479,20 @@ def run(args: argparse.Namespace): # main
 	system = _assemble_elementwise_system(pts, elems, phys, phys_name_map, dim)
 	record_timing("system_assembly", time.perf_counter() - t0, details=f"nodes={len(pts)};elements={len(elems)};dim={dim}")
 	t0 = time.perf_counter()
+	structural_state = prepare_structural_fun(
+		pts,
+		elems,
+		np.sum(system.unit_load_local, axis=1),
+		bool(structural_fun_enabled and dim == 3),
+		structural_fun_radius,
+		structural_fun_load_factor,
+	)
+	record_timing(
+		"structural_fun_prepare",
+		time.perf_counter() - t0,
+		details=f"enabled={structural_state.enabled};radius={structural_fun_radius};load_factor={structural_fun_load_factor}",
+	)
+	t0 = time.perf_counter()
 	vertical_transfer = _build_vertical_heat_transfer_field(
 		pts,
 		elems,
@@ -1314,6 +1506,22 @@ def run(args: argparse.Namespace): # main
 		"vertical_air_transfer_prepare",
 		time.perf_counter() - t0,
 		details=f"enabled={vertical_transfer.enabled};attenuation={vertical_air_attenuation};radius={vertical_air_radius}",
+	)
+	t0 = time.perf_counter()
+	horizontal_transfer = _build_horizontal_air_transfer_field(
+		pts,
+		elems,
+		system.unit_load_local,
+		dim,
+		horizontal_air_transfer,
+		horizontal_air_attenuation,
+		horizontal_air_radius,
+		horizontal_air_power_fraction,
+	)
+	record_timing(
+		"horizontal_air_transfer_prepare",
+		time.perf_counter() - t0,
+		details=f"enabled={horizontal_transfer.enabled};attenuation={horizontal_air_attenuation};radius={horizontal_air_radius};power_fraction={horizontal_air_power_fraction}",
 	)
 
 	t0 = time.perf_counter()
@@ -1335,6 +1543,10 @@ def run(args: argparse.Namespace): # main
 		record_timing("element_burn_initial", 0.0, details=f"changed_elements={len(initial_burned_indices)}")
 		active_elements[initial_burned_indices] = False
 		element_idle_steps[initial_burned_indices] = 0
+	if structural_state.enabled:
+		initial_broken_indices = update_structural_fun(structural_state, system.elem_material_names, t, elems, burned_elements)
+		if len(initial_broken_indices):
+			record_timing("structural_fun_break_initial", 0.0, details=f"broken_elements={len(initial_broken_indices)}")
 
 	empty_dofs = np.array([], dtype=int)
 	empty_vals = np.array([], dtype=float)
@@ -1440,6 +1652,31 @@ def run(args: argparse.Namespace): # main
 		ax_full.add_collection3d(burned_tetra_surface)
 		source_marker_mesh = _add_source_marker_3d(ax_mesh, src_x, src_y, src_z, src_temp)
 		source_marker_full = _add_source_marker_3d(ax_full, src_x, src_y, src_z, src_temp)
+		broken_points = structural_state.centroids[structural_state.broken] if structural_state.enabled else np.empty((0, 3))
+		broken_marker_mesh = ax_mesh.scatter(
+			broken_points[:, 0] if len(broken_points) else [],
+			broken_points[:, 1] if len(broken_points) else [],
+			broken_points[:, 2] if len(broken_points) else [],
+			marker="x",
+			s=95,
+			c="#ffd400",
+			linewidths=2.2,
+			depthshade=False,
+			zorder=10,
+			label="Rupture structurelle",
+		)
+		broken_marker_full = ax_full.scatter(
+			broken_points[:, 0] if len(broken_points) else [],
+			broken_points[:, 1] if len(broken_points) else [],
+			broken_points[:, 2] if len(broken_points) else [],
+			marker="x",
+			s=120,
+			c="#ffd400",
+			linewidths=2.4,
+			depthshade=False,
+			zorder=10,
+			label="Rupture structurelle",
+		)
 
 		fig.colorbar(
 			mesh_scatter,
@@ -1462,9 +1699,11 @@ def run(args: argparse.Namespace): # main
 		legend_handles.append(source_marker_full)
 		if show_burned_elements:
 			legend_handles.append(Patch(facecolor="black", edgecolor="black", alpha=0.9, label="Brule"))
+		if structural_state.enabled:
+			legend_handles.append(broken_marker_full)
 		if legend_handles:
 			ax_full.legend(handles=legend_handles, loc="upper right", framealpha=0.9, title="Objets / Materiaux")
-		return fig, ax_full, {"mesh_scatter": mesh_scatter, "full_surface": full_surface, "mesh_ax": ax_mesh, "full_ax": ax_full, "region_fills": region_fills, "region_edges": region_edges, "burned_tetra_surface": burned_tetra_surface, "source_marker_mesh": source_marker_mesh, "source_marker_full": source_marker_full}
+		return fig, ax_full, {"mesh_scatter": mesh_scatter, "full_surface": full_surface, "mesh_ax": ax_mesh, "full_ax": ax_full, "region_fills": region_fills, "region_edges": region_edges, "burned_tetra_surface": burned_tetra_surface, "source_marker_mesh": source_marker_mesh, "source_marker_full": source_marker_full, "broken_marker_mesh": broken_marker_mesh, "broken_marker_full": broken_marker_full}
 
 	output_dir = animation_path = setup_png_path = timings_csv_path = None
 	if getattr(args, "save", None):
@@ -1529,6 +1768,8 @@ def run(args: argparse.Namespace): # main
 			mesh_scatter = visuals["mesh_scatter"]
 			full_surface = visuals["full_surface"]
 			burned_tetra_surface = visuals["burned_tetra_surface"]
+			broken_marker_mesh = visuals["broken_marker_mesh"]
+			broken_marker_full = visuals["broken_marker_full"]
 			mesh_ax = visuals["mesh_ax"]
 			full_ax = visuals["full_ax"]
 			mesh_scatter.set_array(local_t)
@@ -1544,9 +1785,15 @@ def run(args: argparse.Namespace): # main
 			burned_tetra_surface.set_facecolor((0.0, 0.0, 0.0, 1.0))
 			burned_tetra_surface.set_edgecolor((0.0, 0.0, 0.0, 1.0))
 			burned_tetra_surface.set_alpha(0.9 if show_burned_elements else 0.0)
+			broken_points = structural_state.centroids[structural_state.broken] if structural_state.enabled else np.empty((0, 3))
+			xs = broken_points[:, 0] if len(broken_points) else []
+			ys = broken_points[:, 1] if len(broken_points) else []
+			zs = broken_points[:, 2] if len(broken_points) else []
+			broken_marker_mesh._offsets3d = (xs, ys, zs)
+			broken_marker_full._offsets3d = (xs, ys, zs)
 			mesh_ax.set_title(f"Temps: {sim_time:.1f}s | Tmax: {np.max(local_t):.1f}K | Vue maillage")
 			full_ax.set_title(f"Temps: {sim_time:.1f}s | Tmax: {np.max(local_t):.1f}K | Vue pleine")
-			return [mesh_scatter, full_surface, burned_tetra_surface]
+			return [mesh_scatter, full_surface, burned_tetra_surface, broken_marker_mesh, broken_marker_full]
 
 	def advance_state(current_t: np.ndarray, current_time: float) -> tuple[np.ndarray, float, float]:
 		nonlocal cached_frozen_dofs, cached_free_dofs
@@ -1570,7 +1817,24 @@ def run(args: argparse.Namespace): # main
 					vertical_air_attenuation
 					* rng.uniform(max(0.0, 1.0 - vertical_air_random_delta), 1.0 + vertical_air_random_delta)
 				)
-			src = _hrr_source_rhs(system, elems, burned_elements, t_local, burn_times, sim_time, vertical_transfer, vertical_attenuation_step)
+			horizontal_attenuation_step = horizontal_air_attenuation
+			if horizontal_transfer.enabled and horizontal_air_random_delta > 0.0:
+				horizontal_attenuation_step = float(
+					horizontal_air_attenuation
+					* rng.uniform(max(0.0, 1.0 - horizontal_air_random_delta), 1.0 + horizontal_air_random_delta)
+				)
+			src = _hrr_source_rhs(
+				system,
+				elems,
+				burned_elements,
+				t_local,
+				burn_times,
+				sim_time,
+				vertical_transfer,
+				vertical_attenuation_step,
+				horizontal_transfer,
+				horizontal_attenuation_step,
+			)
 			radiation_loss_rhs = _radiation_loss_rhs(system.m_unit, t_local, volume_loss)
 			rhs = src + bc_field.rhs + volume_loss.rhs - radiation_loss_rhs
 			frozen_dofs = np.flatnonzero(frozen_nodes)
@@ -1633,6 +1897,10 @@ def run(args: argparse.Namespace): # main
 				apply_material_changes(burned_indices)
 				active_elements[burned_indices] = False
 				element_idle_steps[burned_indices] = 0
+			if structural_state.enabled:
+				broken_indices = update_structural_fun(structural_state, system.elem_material_names, t_local, elems, burned_elements)
+				if len(broken_indices):
+					record_timing("structural_fun_break_update", 0.0, frame="", details=f"broken_elements={len(broken_indices)};total={int(np.count_nonzero(structural_state.broken))}")
 			checked_count, frozen_count = _update_element_activity(
 				active_elements,
 				element_idle_steps,
@@ -1730,6 +1998,14 @@ def build_parser() -> argparse.ArgumentParser: # terminal
 	parser.add_argument("--vertical-air-attenuation", dest="vertical_air_attenuation", type=float, default=None, help="Attenuation verticale du transfert air [1/m]")
 	parser.add_argument("--vertical-air-radius", dest="vertical_air_radius", type=float, default=None, help="Rayon horizontal du transfert vertical; 0=auto")
 	parser.add_argument("--vertical-air-random-delta", dest="vertical_air_random_delta", type=float, default=None, help="Variation aleatoire de l'attenuation verticale a chaque sous-pas; 0=desactive")
+	parser.add_argument("--horizontal-air-transfer", dest="horizontal_air_transfer", type=int, choices=[0, 1], default=None, help="Active l'avance horizontale des flammes par mouvements d'air en 2D/3D")
+	parser.add_argument("--horizontal-air-attenuation", dest="horizontal_air_attenuation", type=float, default=None, help="Attenuation horizontale du transfert air [1/m]")
+	parser.add_argument("--horizontal-air-radius", dest="horizontal_air_radius", type=float, default=None, help="Rayon horizontal de l'effet de zone; 0=auto")
+	parser.add_argument("--horizontal-air-power-fraction", dest="horizontal_air_power_fraction", type=float, default=None, help="Fraction max de puissance redistribuee horizontalement")
+	parser.add_argument("--horizontal-air-random-delta", dest="horizontal_air_random_delta", type=float, default=None, help="Variation aleatoire de l'attenuation horizontale a chaque sous-pas; 0=desactive")
+	parser.add_argument("--structural-fun", dest="structural_fun", type=int, nargs="?", const=1, choices=[0, 1], default=None, help="Active l'add-on fun de rupture structurelle simplifiee en 3D")
+	parser.add_argument("--structural-fun-radius", dest="structural_fun_radius", type=float, default=None, help="Rayon horizontal de reprise des charges; 0=auto")
+	parser.add_argument("--structural-fun-load-factor", dest="structural_fun_load_factor", type=float, default=None, help="Facteur multiplicatif sur les charges de poids")
 	parser.add_argument("--t-amb", dest="t_amb", type=float, default=None, help="Temperature ambiante")
 	parser.add_argument("--src-temp", dest="src_temp", type=float, default=None, help="Temperature initiale source")
 	parser.add_argument("--src-x", type=float, default=None, help="X source")

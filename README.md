@@ -1,6 +1,6 @@
 # Projet FEM - diffusion-reaction thermique 2D/3D
 
-Ce projet simule la propagation de chaleur dans un domaine 2D ou 3D solide par elements finis. Il gere plusieurs materiaux, une source chaude initiale, l'allumage des elements combustibles, des pertes thermiques simplifiees, un transport vertical simplifie en 3D, et une visualisation animee.
+Ce projet simule la propagation de chaleur dans un domaine 2D ou 3D solide par elements finis. Il gere plusieurs materiaux, une source chaude initiale, l'allumage des elements combustibles, des pertes thermiques simplifiees, un transport vertical simplifie en 3D, un effet horizontal de mouvements d'air en 2D/3D, et une visualisation animee.
 
 Le point d'entree de reference est `main.py`. C'est la version optimisee actuelle.
 
@@ -9,6 +9,7 @@ Le point d'entree de reference est `main.py`. C'est la version optimisee actuell
 - [Arborescence du projet](#arborescence-du-projet)
 - [Installation](#installation)
 - [Utilisation rapide](#utilisation-rapide)
+- [Scenarios txt](#scenarios-txt)
 - [Versions](#versions)
 - [Options](#options)
 - [Equation physique de notre modele](#equation-physique-de-notre-modele)
@@ -35,6 +36,8 @@ FEM-project/
 |   |-- piece.msh
 |   |-- immeuble.geo
 |   |-- immeuble.msh
+|   |-- default_2d.txt
+|   |-- default_3d.txt
 |   |-- bois-air-bois.geo
 |   `-- bois-air-bois.msh
 `-- old/
@@ -91,6 +94,26 @@ Utiliser un maillage precis :
 python main.py --mesh bois-air-bois.msh --2d
 ```
 
+## Scenarios txt
+
+Au lancement, `main.py` cherche un fichier de scenario texte associe au maillage :
+
+1. le fichier `.txt` a cote du `.msh`, par exemple `models/piece.txt` pour `models/piece.msh` ;
+2. sinon `models/<nom_du_msh>.txt`, par exemple `models/piece.txt` ;
+3. sinon `models/default_2d.txt` ou `models/default_3d.txt` selon la dimension.
+
+Les options donnees en ligne de commande gardent la priorite sur le fichier texte. Le format est volontairement simple :
+
+```text
+dt=50.0
+steps=2000
+h_conv=50.0
+horizontal_air_transfer=1
+src_x=0.3
+```
+
+Les commentaires avec `#` sont acceptes. Les noms d'options utilisent les memes noms que dans le code, avec `_` au lieu de `-`.
+
 ## Versions
 
 | Fichier | Role |
@@ -122,6 +145,14 @@ python main.py --mesh bois-air-bois.msh --2d
 | `--vertical-air-attenuation` | Attenuation du transfert vertical avec la hauteur. |
 | `--vertical-air-radius` | Rayon horizontal du transfert vertical. `0` signifie automatique. |
 | `--vertical-air-random-delta` | Variation aleatoire de l'attenuation verticale. |
+| `--horizontal-air-transfer` | Active l'avance horizontale des flammes par mouvements d'air en 2D/3D. |
+| `--horizontal-air-attenuation` | Attenuation du transfert horizontal avec la distance. |
+| `--horizontal-air-radius` | Rayon horizontal de l'effet de zone. `0` signifie automatique. |
+| `--horizontal-air-power-fraction` | Fraction maximale de puissance redistribuee horizontalement. |
+| `--horizontal-air-random-delta` | Variation aleatoire de l'attenuation horizontale. |
+| `--structural-fun` | Active l'add-on fun de rupture structurelle simplifiee en 3D. |
+| `--structural-fun-radius` | Rayon horizontal de reprise des charges. `0` signifie automatique. |
+| `--structural-fun-load-factor` | Facteur multiplicatif applique aux charges de poids. |
 | `--t-amb` | Temperature ambiante. |
 | `--src-temp` | Temperature initiale de la source. |
 | `--src-x`, `--src-y`, `--src-z` | Position de la source. |
@@ -157,8 +188,12 @@ Les materiaux sont definis dans `materialsbank.py`.
 | 6 | `metal` | elements metalliques, forte conduction |
 | 7 | `meche` | amorce combustible rapide |
 | 8 | `explosif` | degagement thermique tres court et intense |
+| 9 | `viande` | matiere organique humide, combustion moderee |
+| 10 | `vegetation` | combustible vegetal, propagation de flamme |
 
 Chaque materiau possede aussi une variante `*_burn`. Quand un element depasse son seuil `Tc`, il passe dans son etat brule : ses proprietes thermiques sont modifiees et son HRR suit la loi du materiau.
+
+Les materiaux portent aussi des caracteristiques mecaniques simplifiees pour l'add-on `--structural-fun` : `structural`, `compressive_strength`, `tensile_strength` et `strength_temp_coeff`. Les variantes brulees gardent ces champs mais avec une resistance reduite.
 
 ## Equation physique de notre modele
 
@@ -266,6 +301,17 @@ Le modele est volontairement simplifie pour rester calculable rapidement et lisi
 
 - En 3D, le transfert vertical est une approximation : une partie du HRR peut chauffer les elements au-dessus.
 - Le facteur utilise est attenue avec la hauteur et un rayon horizontal.
+- En 2D et 3D, le transfert horizontal par mouvements d'air redistribue une fraction plafonnee du HRR vers les elements voisins non brules.
+- Cet effet horizontal est pilote par un rayon, une attenuation avec la distance et une fraction maximale de puissance.
+
+### Add-on structure fun
+
+- L'option `--structural-fun` active un calcul volontairement simplifie des charges de poids en 3D.
+- Le module independant `structural_fun.py` calcule les volumes, les poids propres et une reprise de charge vers les elements sous-jacents.
+- Un element ne peut casser que s'il est deja brule et si son materiau est marque `structural`.
+- La resistance effective diminue avec la temperature via `strength_temp_coeff`.
+- Les elements casses sont marques par une croix jaune dans la vue 3D.
+- Ce n'est pas un solveur d'elasticite : il donne un indicateur qualitatif de fragilite, pas une rupture structurelle realiste.
 
 ### Maillage et materiaux
 
