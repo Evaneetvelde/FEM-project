@@ -1,3 +1,4 @@
+#WIP, calcul très simplifié des efforts strucurel, pas dans le projet final
 from __future__ import annotations
 
 from dataclasses import dataclass
