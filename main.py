@@ -42,6 +42,8 @@ PHYSICAL_ID_MAP = { # lien id mesh -> materiau
 	8: "explosif",
 	9: "viande",
 	10: "vegetation",
+	11: "ptfe",
+	12: "acier",
 }
 
 ROLE_KEYWORDS = { # lien materiau -> role dans la visualisation
@@ -49,7 +51,7 @@ ROLE_KEYWORDS = { # lien materiau -> role dans la visualisation
 	"window": {"fenetre", "fenetres", "window", "windows", "glass", "verre"},
 	"floor": {"sol", "floor", "slab", "dalle"},
 	"door": {"porte", "portes", "door", "doors"},
-	"column": {"colonne", "colonnes", "column", "columns", "pillar", "pillars"},
+	"column": {"colonne", "colonnes", "column", "columns", "pillar", "pillars", "acier", "steel"},
 	"vegetation": {"vegetation", "vegetal", "plante", "plantes", "tree", "trees"},
 }
 
@@ -632,7 +634,7 @@ def _apply_burn_deltas(system: ElementwiseSystem, elems: np.ndarray, burned_indi
 		system.elem_material_names[int(elem_idx)] = get_burn_material_name(str(system.elem_material_names[int(elem_idx)]))
 	system.q_node, system.tc_node = _node_reaction_fields(elems, system.elem_material_names, n_nodes)
 
-def _extract_boundary_faces(elems: np.ndarray, phys_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]: # calcul
+def _extract_boundary_faces(elems: np.ndarray, phys_ids: np.ndarray, include_material_interfaces: bool = False) -> tuple[np.ndarray, np.ndarray]: # calcul
 	"""
 	helper extraction faces bords
 
@@ -640,7 +642,7 @@ def _extract_boundary_faces(elems: np.ndarray, phys_ids: np.ndarray) -> tuple[np
 	param: phys_ids: tableau des ids physiques par élément
 	return: tuple de tableaux (boundary_faces, boundary_phys) contenant faces de bord et ids
 	"""
-	face_map: dict[tuple[int, int, int], tuple[int, int]] = {}
+	face_map: dict[tuple[int, int, int], list[int]] = {}
 	for elem, pid in zip(elems, phys_ids, strict=False):
 		local_faces = (
 			(elem[0], elem[1], elem[2]),
@@ -651,17 +653,20 @@ def _extract_boundary_faces(elems: np.ndarray, phys_ids: np.ndarray) -> tuple[np
 		for face in local_faces:
 			key = tuple(sorted(int(v) for v in face))
 			if key in face_map:
-				count, existing_pid = face_map[key]
-				face_map[key] = (count + 1, existing_pid)
+				face_map[key].append(int(pid))
 			else:
-				face_map[key] = (1, int(pid))
+				face_map[key] = [int(pid)]
 
 	boundary_faces: list[tuple[int, int, int]] = []
 	boundary_phys: list[int] = []
-	for key, (count, pid) in face_map.items():
-		if count == 1:
+	for key, pids in face_map.items():
+		if len(pids) == 1:
 			boundary_faces.append(key)
-			boundary_phys.append(pid)
+			boundary_phys.append(pids[0])
+		elif include_material_interfaces and len(set(pids)) > 1:
+			visible_pid = next((pid for pid in pids if pid != 5), pids[0])
+			boundary_faces.append(key)
+			boundary_phys.append(-visible_pid)
 	return np.asarray(boundary_faces, dtype=int), np.asarray(boundary_phys, dtype=int)
 
 def _extract_boundary_edges(elems: np.ndarray, phys_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]: # calcul
@@ -1140,14 +1145,19 @@ def _add_region_overlays_3d(ax, points: np.ndarray, boundary_faces: np.ndarray, 
 	"""
 	collections = []
 	for region in regions:
-		mask = boundary_phys == int(region["pid"])
+		mask = np.abs(boundary_phys) == int(region["pid"])
 		if not np.any(mask):
 			continue
 		face_vertices = [points[face] for face in boundary_faces[mask]]
+		has_interface_faces = bool(np.any(boundary_phys[mask] < 0))
+		facecolor = "#050505" if has_interface_faces else str(region["color"])
+		edgecolor = "black" if has_interface_faces else str(region["color"])
+		alpha = 1.0 if has_interface_faces else float(region["overlay_alpha_3d"])
+		linewidth = 0.55 if has_interface_faces else 0.15
 		if include_solid_fill and bool(region["solid_fill"]):
-			poly = Poly3DCollection(face_vertices, facecolors=str(region["color"]), edgecolors="black", linewidths=float(region["edge_width"]) * 0.4, alpha=float(region["overlay_alpha_3d"]), zorder=3)
+			poly = Poly3DCollection(face_vertices, facecolors=facecolor, edgecolors="black", linewidths=max(linewidth, float(region["edge_width"]) * 0.4), alpha=alpha, zorder=5 if has_interface_faces else 3)
 		else:
-			poly = Poly3DCollection(face_vertices, facecolors=str(region["color"]), edgecolors=str(region["color"]), linewidths=0.15, alpha=float(region["overlay_alpha_3d"]),zorder=1,)
+			poly = Poly3DCollection(face_vertices, facecolors=facecolor, edgecolors=edgecolor, linewidths=linewidth, alpha=alpha,zorder=5 if has_interface_faces else 1,)
 		ax.add_collection3d(poly)
 		collections.append(poly)
 	return collections
@@ -1158,14 +1168,15 @@ def _add_region_edges_3d(ax, points: np.ndarray, boundary_faces: np.ndarray, bou
 	"""
 	collections = []
 	for region in regions:
-		if not bool(region["solid_fill"]):
-			continue
-		mask = boundary_phys == int(region["pid"])
+		mask = np.abs(boundary_phys) == int(region["pid"])
 		if not np.any(mask):
+			continue
+		has_interface_edges = bool(np.any(boundary_phys[mask] < 0))
+		if not has_interface_edges and not bool(region["solid_fill"]):
 			continue
 		region_edges = _build_boundary_edges(boundary_faces[mask])
 		segments = [[points[i], points[j]] for i, j in region_edges]
-		collection = Line3DCollection(segments, colors="black", linewidths=max(0.55, float(region["edge_width"])), alpha=0.95)
+		collection = Line3DCollection(segments, colors="black", linewidths=1.1 if has_interface_edges else max(0.55, float(region["edge_width"])), alpha=1.0 if has_interface_edges else 0.95)
 		ax.add_collection3d(collection)
 		collections.append(collection)
 	return collections
@@ -1191,11 +1202,22 @@ def _add_source_marker_2d(ax, src_x: float, src_y: float, src_radius: float, src
 		ax.add_patch(Circle( (src_x, src_y), src_radius, fill=False, edgecolor="#ff2d00", linewidth=1.4, alpha=0.85, zorder=7))
 	return marker
 
-def _add_source_marker_3d(ax, src_x: float, src_y: float, src_z: float, src_temp: float): #visuel
+def _add_source_marker_3d(ax, src_x: float, src_y: float, src_z: float, src_temp: float, points: np.ndarray | None = None): #visuel
 	"""
 	Helper ajoutant un marqueur pour la source de chaleur sur une visualisation 3D
 	"""
-	return ax.scatter([src_x], [src_y], [src_z], marker="X", s=95, c="#ff2d00", edgecolors="black", linewidths=0.8, depthshade=False, zorder=8, label="Source: "+str(src_temp)+" K")
+	marker = ax.scatter([src_x], [src_y], [src_z], marker="X", s=220, c="#ff2d00", edgecolors="white", linewidths=1.8, depthshade=False, zorder=20, label="Source: "+str(src_temp)+" K")
+	if points is not None and len(points):
+		mins = np.min(points, axis=0)
+		maxs = np.max(points, axis=0)
+		segments = [
+			[(mins[0], src_y, src_z), (maxs[0], src_y, src_z)],
+			[(src_x, mins[1], src_z), (src_x, maxs[1], src_z)],
+			[(src_x, src_y, mins[2]), (src_x, src_y, maxs[2])],
+		]
+		beacon = Line3DCollection(segments, colors="#ff2d00", linewidths=2.4, alpha=1.0, zorder=19)
+		ax.add_collection3d(beacon)
+	return marker
 
 
 def _plot_3d_mesh_preview(points: np.ndarray, boundary_faces: np.ndarray, title: str): # visuel
@@ -1251,67 +1273,52 @@ def _set_equal_3d_axes(ax, points: np.ndarray) -> None: # visuel
 	ax.set_zlim(center[2] - radius, center[2] + radius)
 
 
-def _scenario_defaults(dim: int) -> dict[str, float | int]: # main
+SCENARIO_KEYS = {
+	"dt",
+	"steps",
+	"sub_steps",
+	"theta",
+	"h_conv",
+	"general_loss",
+	"vent_loss",
+	"radiation_loss",
+	"vertical_air_transfer",
+	"vertical_air_attenuation",
+	"vertical_air_radius",
+	"vertical_air_random_delta",
+	"horizontal_air_transfer",
+	"horizontal_air_attenuation",
+	"horizontal_air_radius",
+	"horizontal_air_power_fraction",
+	"horizontal_air_random_delta",
+	"structural_fun",
+	"structural_fun_radius",
+	"structural_fun_load_factor",
+	"t_amb",
+	"src_temp",
+	"src_x",
+	"src_y",
+	"src_z",
+	"src_radius",
+	"source_time",
+}
+
+
+def _default_scenario_path(dim: int) -> Path:
+	return PROJECT_ROOT / "models" / f"default_{int(dim)}d.txt"
+
+
+def _scenario_defaults(dim: int, allowed_keys: set[str] | None = None) -> tuple[dict[str, float | int], Path | None]: # main
 	"""
-	Centralise les données de lancement de la simulation selon la dimention, à étendre pour accepté les txt du même nom que les maillages
+	Charge les parametres depuis models/default_2d.txt ou models/default_3d.txt.
 	"""
-	if dim == 3:
-		return {
-			"dt": 100.0,
-			"steps": 400,
-			"sub_steps": 1,
-			"theta": 1.0,
-			"h_conv": 50.0,
-			"general_loss": 4.0,
-			"vent_loss": 15.0,
-			"radiation_loss": 5.0e-8,
-			"vertical_air_transfer": 1,
-			"vertical_air_attenuation": 0.25,
-			"vertical_air_radius": 0.0,
-			"vertical_air_random_delta": 0.2,
-			"horizontal_air_transfer": 1,
-			"horizontal_air_attenuation": 0.35,
-			"horizontal_air_radius": 0.0,
-			"horizontal_air_power_fraction": 0.35,
-			"horizontal_air_random_delta": 0.15,
-			"structural_fun": 0,
-			"structural_fun_radius": 0.0,
-			"structural_fun_load_factor": 1.0,
-			"t_amb": 293.0,
-			"src_temp": 800.0,
-			"src_x": 0.0,
-			"src_y": 0.0,
-			"src_z": 0.0,
-			"src_radius": 1.0,
-		}
-	return {
-		"dt": 50.0,
-		"steps": 2000,
-		"sub_steps": 1,
-		"theta": 1.0,
-		"h_conv": 50.0,
-		"general_loss": 4.0,
-		"vent_loss": 15.0,
-		"radiation_loss": 5.0e-8,
-		"vertical_air_transfer": 0,
-		"vertical_air_attenuation": 0.25,
-		"vertical_air_radius": 0.0,
-		"vertical_air_random_delta": 0.0,
-		"horizontal_air_transfer": 1,
-		"horizontal_air_attenuation": 0.35,
-		"horizontal_air_radius": 0.0,
-		"horizontal_air_power_fraction": 0.35,
-		"horizontal_air_random_delta": 0.15,
-		"structural_fun": 0,
-		"structural_fun_radius": 0.0,
-		"structural_fun_load_factor": 1.0,
-		"t_amb": 293.0,
-		"src_temp": 800.0,
-		"src_x": 0.3,
-		"src_y": 0.0,
-		"src_z": 0.0,
-		"src_radius": 0.05,
-	}
+	defaults: dict[str, float | int] = {}
+	allowed = allowed_keys if allowed_keys is not None else set(SCENARIO_KEYS)
+	default_path = _default_scenario_path(dim)
+	if not default_path.exists():
+		raise FileNotFoundError(f"Scenario par defaut introuvable: {default_path}")
+	defaults.update(_read_scenario_file(default_path, allowed))
+	return defaults, default_path
 
 
 def _parse_scenario_value(raw_value: str) -> float | int:
@@ -1349,24 +1356,52 @@ def _read_scenario_file(scenario_path: Path, allowed_keys: set[str]) -> dict[str
 
 
 def _scenario_txt_candidates(mesh_path: Path, dim: int) -> list[Path]:
-	default_path = PROJECT_ROOT / "models" / f"default_{dim}d.txt"
 	candidates = [mesh_path.with_suffix(".txt")]
-	models_named_path = PROJECT_ROOT / "models" / f"{mesh_path.stem}.txt"
-	if models_named_path not in candidates:
-		candidates.append(models_named_path)
-	candidates.append(default_path)
+	for scenario_path in (
+		PROJECT_ROOT / "models" / Path(mesh_path.name).with_suffix(".txt"),
+		PROJECT_ROOT / "models" / "perf" / Path(mesh_path.name).with_suffix(".txt"),
+		_default_scenario_path(dim),
+	):
+		if scenario_path not in candidates:
+			candidates.append(scenario_path)
 	return candidates
 
 
-def _load_scenario_defaults(dim: int, mesh_path: Path) -> tuple[dict[str, float | int], Path | None]:
-	defaults = _scenario_defaults(dim)
-	allowed_keys = set(defaults)
+def _load_scenario_defaults(dim: int, mesh_path: Path) -> tuple[dict[str, float | int], Path | None]: # main
+	"""
+	loed les parametres de simulation depuis un fichier txt associé au maillage, ou depuis le scenario par defaut si aucun fichier n'est trouvé
+	"""
+	allowed_keys = set(SCENARIO_KEYS)
+	defaults, default_path = _scenario_defaults(dim, allowed_keys)
 	for scenario_path in _scenario_txt_candidates(mesh_path, dim):
 		if scenario_path.exists():
+			if scenario_path == default_path:
+				return defaults, default_path
 			file_values = _read_scenario_file(scenario_path, allowed_keys)
 			defaults.update(file_values)
 			return defaults, scenario_path
 	return defaults, None
+
+
+def _resolve_mesh_path(mesh_file: str) -> Path: # main
+	"""
+	Gère les chemins d'accès au txt du maillage
+	"""
+	mesh_path = Path(mesh_file)
+	if mesh_path.is_absolute() and mesh_path.exists():
+		return mesh_path
+
+	candidates = [
+		PROJECT_ROOT / mesh_path,
+		PROJECT_ROOT / "models" / mesh_path,
+		PROJECT_ROOT / "models" / mesh_path.name,
+		PROJECT_ROOT / "models" / "perf" / mesh_path.name,
+		mesh_path,
+	]
+	for candidate in candidates:
+		if candidate.exists():
+			return candidate
+	return PROJECT_ROOT / "models" / mesh_path
 
 
 def _resolve_save_targets(save_arg: str) -> tuple[Path, Path, Path, Path]: # main
@@ -1406,11 +1441,7 @@ def run(args: argparse.Namespace): # main
 
 	dim = int(args.dim)
 	mesh_file = args.mesh or ("piece.msh" if dim == 2 else "immeuble.msh")
-	base_dir = PROJECT_ROOT
-	# Priorite au dossier models/ pour eviter les conflits avec des fichiers locaux vides
-	mesh_path = base_dir / "models" / Path(mesh_file).name
-	if not mesh_path.exists():
-		mesh_path = Path(mesh_file)
+	mesh_path = _resolve_mesh_path(mesh_file)
 	defaults, scenario_path = _load_scenario_defaults(dim, mesh_path)
 	dt = float(args.dt if args.dt is not None else defaults["dt"])
 	steps = int(args.steps if args.steps is not None else defaults["steps"])
@@ -1438,6 +1469,7 @@ def run(args: argparse.Namespace): # main
 	src_y = float(args.src_y if args.src_y is not None else defaults["src_y"])
 	src_z = float(args.src_z if args.src_z is not None else defaults["src_z"])
 	src_radius = float(args.src_radius if args.src_radius is not None else defaults["src_radius"])
+	source_time = max(0.0, float(args.source_time if args.source_time is not None else defaults.get("source_time", 0.0)))
 	element_freeze_steps = max(0, int(args.element_freeze_steps))
 	element_freeze_margin = max(0.0, float(args.element_freeze_margin))
 	node_freeze_steps = max(0, int(args.node_freeze_steps))
@@ -1530,11 +1562,12 @@ def run(args: argparse.Namespace): # main
 		dist = np.hypot(pts[:, 0] - src_x, pts[:, 1] - src_y)
 	else:
 		dist = np.sqrt((pts[:, 0] - src_x) ** 2 + (pts[:, 1] - src_y) ** 2 + (pts[:, 2] - src_z) ** 2)
-	t[dist <= src_radius] = src_temp
+	source_nodes = dist <= src_radius
+	t[source_nodes] = src_temp
 	record_timing(
 		"initial_conditions",
 		time.perf_counter() - t0,
-		details=f"src_x={src_x};src_y={src_y};src_z={src_z};src_radius={src_radius};src_temp={src_temp}",
+		details=f"src_x={src_x};src_y={src_y};src_z={src_z};src_radius={src_radius};src_temp={src_temp};source_time={source_time}",
 	)
 	initial_burned_indices = _update_burned_elements(burned_elements, elems, t, elem_tc, active_elements)
 	if len(initial_burned_indices):
@@ -1551,10 +1584,11 @@ def run(args: argparse.Namespace): # main
 	empty_dofs = np.array([], dtype=int)
 	empty_vals = np.array([], dtype=float)
 	free_dofs = precompute_dirichlet_dofs(len(pts), empty_dofs)
-	boundary_faces = boundary_phys = boundary_edges = boundary_edge_phys = None
+	boundary_faces = boundary_phys = visual_faces = visual_phys = boundary_edges = boundary_edge_phys = None
 	visual_regions = _build_visual_regions(phys, phys_name_map)
 	if dim == 3:
 		boundary_faces, boundary_phys = _extract_boundary_faces(elems, phys)
+		visual_faces, visual_phys = _extract_boundary_faces(elems, phys, include_material_interfaces=True)
 		bc_field = _build_boundary_condition_field(pts, boundary_faces, dim, h_conv, t_amb)
 	else:
 		boundary_edges, boundary_edge_phys = _extract_boundary_edges(elems, phys)
@@ -1607,7 +1641,7 @@ def run(args: argparse.Namespace): # main
 		ax_mesh = fig.add_subplot(121, projection="3d")
 		ax_full = fig.add_subplot(122, projection="3d")
 
-		edges = _build_boundary_edges(boundary_faces)
+		edges = _build_boundary_edges(visual_faces)
 		segments = [[pts[i], pts[j]] for i, j in edges]
 		mesh_lines = Line3DCollection(segments, colors="black", linewidths=0.2, alpha=0.45)
 		ax_mesh.add_collection3d(mesh_lines)
@@ -1624,25 +1658,25 @@ def run(args: argparse.Namespace): # main
 			depthshade=False,
 		)
 
-		_add_region_overlays_3d(ax_full, pts, boundary_faces, boundary_phys, visual_regions, include_solid_fill=False)
-		face_temps = np.mean(local_t[boundary_faces], axis=1)
+		_add_region_overlays_3d(ax_full, pts, visual_faces, visual_phys, visual_regions, include_solid_fill=False)
+		face_temps = np.mean(local_t[visual_faces], axis=1)
 		norm = Normalize(vmin=THERMAL_3D_VMIN, vmax=THERMAL_3D_VMAX)
 		face_colors = THERMAL_CMAP_3D(norm(face_temps))
 		if show_burned_elements:
-			burned_boundary_mask = _burned_boundary_face_mask(boundary_faces, elems, burned_elements)
+			burned_boundary_mask = _burned_boundary_face_mask(visual_faces, elems, burned_elements)
 			face_colors[burned_boundary_mask] = (0.0, 0.0, 0.0, 1.0)
 		full_surface = Poly3DCollection(
-			[pts[face] for face in boundary_faces],
+			[pts[face] for face in visual_faces],
 			facecolors=face_colors,
 			edgecolors="none",
 			linewidths=0.0,
 			alpha=0.56,
 		)
 		ax_full.add_collection3d(full_surface)
-		region_fills = _add_region_overlays_3d(ax_full, pts, boundary_faces, boundary_phys, visual_regions, include_solid_fill=True)
-		region_edges = _add_region_edges_3d(ax_full, pts, boundary_faces, boundary_phys, visual_regions)
+		region_fills = _add_region_overlays_3d(ax_full, pts, visual_faces, visual_phys, visual_regions, include_solid_fill=True)
+		region_edges = _add_region_edges_3d(ax_full, pts, visual_faces, visual_phys, visual_regions)
 		burned_tetra_surface = Poly3DCollection(
-			_burned_boundary_face_vertices(pts, boundary_faces, elems, burned_elements) if show_burned_elements else [],
+			_burned_boundary_face_vertices(pts, visual_faces, elems, burned_elements) if show_burned_elements else [],
 			facecolors=(0.0, 0.0, 0.0, 1.0),
 			edgecolors=(0.0, 0.0, 0.0, 1.0),
 			linewidths=0.12,
@@ -1650,8 +1684,8 @@ def run(args: argparse.Namespace): # main
 			zorder=9,
 		)
 		ax_full.add_collection3d(burned_tetra_surface)
-		source_marker_mesh = _add_source_marker_3d(ax_mesh, src_x, src_y, src_z, src_temp)
-		source_marker_full = _add_source_marker_3d(ax_full, src_x, src_y, src_z, src_temp)
+		source_marker_mesh = _add_source_marker_3d(ax_mesh, src_x, src_y, src_z, src_temp, pts)
+		source_marker_full = _add_source_marker_3d(ax_full, src_x, src_y, src_z, src_temp, pts)
 		broken_points = structural_state.centroids[structural_state.broken] if structural_state.enabled else np.empty((0, 3))
 		broken_marker_mesh = ax_mesh.scatter(
 			broken_points[:, 0] if len(broken_points) else [],
@@ -1714,11 +1748,11 @@ def run(args: argparse.Namespace): # main
 
 	if args.plot:
 		if dim == 3:
-			fig_mesh, _ax_mesh = _plot_3d_mesh_preview(pts, boundary_faces, "Maillage 3D")
+			fig_mesh, _ax_mesh = _plot_3d_mesh_preview(pts, visual_faces, "Maillage 3D")
 			#plt.tight_layout()
 			plt.show()
 			plt.close(fig_mesh)
-			fig_full, _ax_full = _plot_3d_filled_preview(pts, boundary_faces, boundary_phys, visual_regions, "Batiment 3D plein")
+			fig_full, _ax_full = _plot_3d_filled_preview(pts, visual_faces, visual_phys, visual_regions, "Batiment 3D plein")
 			#plt.tight_layout()
 			plt.show()
 			plt.close(fig_full)
@@ -1774,14 +1808,14 @@ def run(args: argparse.Namespace): # main
 			full_ax = visuals["full_ax"]
 			mesh_scatter.set_array(local_t)
 			mesh_scatter.set_clim(vmin=THERMAL_3D_VMIN, vmax=THERMAL_3D_VMAX)
-			face_temps = np.mean(local_t[boundary_faces], axis=1)
+			face_temps = np.mean(local_t[visual_faces], axis=1)
 			norm = Normalize(vmin=THERMAL_3D_VMIN, vmax=THERMAL_3D_VMAX)
 			face_colors = THERMAL_CMAP_3D(norm(face_temps))
 			if show_burned_elements:
-				burned_boundary_mask = _burned_boundary_face_mask(boundary_faces, elems, burned_elements)
+				burned_boundary_mask = _burned_boundary_face_mask(visual_faces, elems, burned_elements)
 				face_colors[burned_boundary_mask] = (0.0, 0.0, 0.0, 1.0)
 			full_surface.set_facecolor(face_colors)
-			burned_tetra_surface.set_verts(_burned_boundary_face_vertices(pts, boundary_faces, elems, burned_elements) if show_burned_elements else [])
+			burned_tetra_surface.set_verts(_burned_boundary_face_vertices(pts, visual_faces, elems, burned_elements) if show_burned_elements else [])
 			burned_tetra_surface.set_facecolor((0.0, 0.0, 0.0, 1.0))
 			burned_tetra_surface.set_edgecolor((0.0, 0.0, 0.0, 1.0))
 			burned_tetra_surface.set_alpha(0.9 if show_burned_elements else 0.0)
@@ -1837,8 +1871,17 @@ def run(args: argparse.Namespace): # main
 			)
 			radiation_loss_rhs = _radiation_loss_rhs(system.m_unit, t_local, volume_loss)
 			rhs = src + bc_field.rhs + volume_loss.rhs - radiation_loss_rhs
-			frozen_dofs = np.flatnonzero(frozen_nodes)
+			source_active = source_time > 0.0 and sim_time < source_time
+			if source_active:
+				step_frozen_nodes = frozen_nodes.copy()
+				step_frozen_nodes[source_nodes] = True
+				frozen_dofs = np.flatnonzero(step_frozen_nodes)
+			else:
+				frozen_dofs = np.flatnonzero(frozen_nodes)
 			frozen_vals = t_local[frozen_dofs]
+			if source_active and len(frozen_dofs):
+				frozen_vals = frozen_vals.copy()
+				frozen_vals[source_nodes[frozen_dofs]] = src_temp
 			if len(frozen_dofs) == 0:
 				step_free_dofs = free_dofs
 				cached_frozen_dofs = empty_dofs
@@ -1864,6 +1907,8 @@ def run(args: argparse.Namespace): # main
 				),
 				dtype=float,
 			)
+			if source_active:
+				t_local[source_nodes] = src_temp
 			checked_nodes, newly_frozen_nodes = _update_frozen_nodes(
 				frozen_nodes,
 				node_idle_steps,
@@ -2012,6 +2057,7 @@ def build_parser() -> argparse.ArgumentParser: # terminal
 	parser.add_argument("--src-y", type=float, default=None, help="Y source")
 	parser.add_argument("--src-z", type=float, default=None, help="Z source (3D)")
 	parser.add_argument("--src-radius", type=float, default=None, help="Rayon source initial")
+	parser.add_argument("--source-time", "--temps-source", "--temps-sources", dest="source_time", type=float, default=None, help="Temps de simulation pendant lequel la source reste active; 0=source initiale seulement")
 	parser.add_argument("--element-freeze-steps", dest="element_freeze_steps", type=int, default=25, help="Nombre de steps froids avant de ne plus retester un element; 0=desactive")
 	parser.add_argument("--element-freeze-margin", dest="element_freeze_margin", type=float, default=25.0, help="Marge sous Tc pour considerer un element froid/stable [K]")
 	parser.add_argument("--node-freeze-steps", dest="node_freeze_steps", type=int, default=20, help="Nombre de steps quasi stationnaires avant Dirichlet temporaire; 0=desactive")
@@ -2021,8 +2067,8 @@ def build_parser() -> argparse.ArgumentParser: # terminal
 	parser.add_argument("--node-thaw-margin", dest="node_thaw_margin", type=float, default=35.0, help="Marge sous Tc d'un voisin avant degel [K]")
 	parser.add_argument("--max-frozen-node-fraction", dest="max_frozen_node_fraction", type=float, default=0.90, help="Fraction maximale de noeuds geles")
 	parser.add_argument("--dim", type=int, choices=[2, 3], default=2, help="Dimension du calcul")
-	parser.add_argument("--2d", dest="dim", action="store_const", const=2, help="Force le mode 2D")
-	parser.add_argument("--3d", dest="dim", action="store_const", const=3, help="Force le mode 3D")
+	parser.add_argument("-2d", "--2d", dest="dim", action="store_const", const=2, help="Force le mode 2D")
+	parser.add_argument("-3d", "--3d", dest="dim", action="store_const", const=3, help="Force le mode 3D")
 	parser.add_argument("--no-plot", dest="plot", action="store_false", help="Desactive l'affichage final")
 	parser.add_argument("--hide-burned-elements", dest="hide_burned_elements", action="store_true", help="Masque l'affichage noir des elements brules sans desactiver leur calcul")
 	parser.add_argument("--save", dest="save", type=str, default=None, help="Nom de fichier MP4 pour sauvegarder l'animation")

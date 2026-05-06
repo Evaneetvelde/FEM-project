@@ -190,6 +190,8 @@ Les materiaux sont definis dans `materialsbank.py`.
 | 8 | `explosif` | degagement thermique tres court et intense |
 | 9 | `viande` | matiere organique humide, combustion moderee |
 | 10 | `vegetation` | combustible vegetal, propagation de flamme |
+| 11 | `ptfe` | polymere fluore isolant, non structurel |
+| 12 | `acier` | acier structurel parametrable dans `materialsbank.py` |
 
 Chaque materiau possede aussi une variante `*_burn`. Quand un element depasse son seuil `Tc`, il passe dans son etat brule : ses proprietes thermiques sont modifiees et son HRR suit la loi du materiau.
 
