@@ -1198,9 +1198,11 @@ def _add_source_marker_2d(ax, src_x: float, src_y: float, src_radius: float, src
 	Helper ajoutant un marqueur pour la source de chaleur sur une visualisation 2D
 	"""
 	marker = ax.scatter([src_x], [src_y], marker="X", s=115, c="#ff2d00", edgecolors="black", linewidths=0.9, zorder=8, label="Source: "+str(src_temp)+" K")
+	radius_patch = None
 	if src_radius > 0.0:
-		ax.add_patch(Circle( (src_x, src_y), src_radius, fill=False, edgecolor="#ff2d00", linewidth=1.4, alpha=0.85, zorder=7))
-	return marker
+		radius_patch = Circle( (src_x, src_y), src_radius, fill=False, edgecolor="#ff2d00", linewidth=1.4, alpha=0.85, zorder=7)
+		ax.add_patch(radius_patch)
+	return marker, radius_patch
 
 def _add_source_marker_3d(ax, src_x: float, src_y: float, src_z: float, src_temp: float, points: np.ndarray | None = None): #visuel
 	"""
@@ -1217,7 +1219,9 @@ def _add_source_marker_3d(ax, src_x: float, src_y: float, src_z: float, src_temp
 		]
 		beacon = Line3DCollection(segments, colors="#ff2d00", linewidths=2.4, alpha=1.0, zorder=19)
 		ax.add_collection3d(beacon)
-	return marker
+	else:
+		beacon = None
+	return marker, beacon
 
 
 def _plot_3d_mesh_preview(points: np.ndarray, boundary_faces: np.ndarray, title: str): # visuel
@@ -1610,6 +1614,9 @@ def run(args: argparse.Namespace): # main
 			details=f"changed_elements={len(burned_indices)}",
 		)
 
+	def source_visible(sim_time: float) -> bool:
+		return sim_time <= source_time if source_time > 0.0 else sim_time <= 0.0
+
 	def _setup_axes(local_t: np.ndarray, title: str):
 		if dim == 2:
 			fig, ax = plt.subplots(figsize=(10, 8))
@@ -1624,7 +1631,7 @@ def run(args: argparse.Namespace): # main
 				zorder=9,
 			)
 			ax.add_collection(burned_collection)
-			source_marker = _add_source_marker_2d(ax, src_x, src_y, src_radius, src_temp)
+			source_marker, source_radius_patch = _add_source_marker_2d(ax, src_x, src_y, src_radius, src_temp)
 			plt.colorbar(im, ax=ax, label="Temperature [K]")
 			ax.set_facecolor("#1A12BD")
 			ax.set_aspect("equal")
@@ -1635,7 +1642,7 @@ def run(args: argparse.Namespace): # main
 				legend_handles.append(Patch(facecolor="black", edgecolor="black", alpha=0.28, label="Brule"))
 			if legend_handles:
 				ax.legend(handles=legend_handles, loc="upper right", framealpha=0.9, title="Objets / Materiaux")
-			return fig, ax, {"field": im, "burned_collection": burned_collection, "source_marker": source_marker}
+			return fig, ax, {"field": im, "burned_collection": burned_collection, "source_marker": source_marker, "source_radius_patch": source_radius_patch}
 
 		fig = plt.figure(figsize=(16, 8))
 		ax_mesh = fig.add_subplot(121, projection="3d")
@@ -1684,8 +1691,8 @@ def run(args: argparse.Namespace): # main
 			zorder=9,
 		)
 		ax_full.add_collection3d(burned_tetra_surface)
-		source_marker_mesh = _add_source_marker_3d(ax_mesh, src_x, src_y, src_z, src_temp, pts)
-		source_marker_full = _add_source_marker_3d(ax_full, src_x, src_y, src_z, src_temp, pts)
+		source_marker_mesh, source_beacon_mesh = _add_source_marker_3d(ax_mesh, src_x, src_y, src_z, src_temp, pts)
+		source_marker_full, source_beacon_full = _add_source_marker_3d(ax_full, src_x, src_y, src_z, src_temp, pts)
 		broken_points = structural_state.centroids[structural_state.broken] if structural_state.enabled else np.empty((0, 3))
 		broken_marker_mesh = ax_mesh.scatter(
 			broken_points[:, 0] if len(broken_points) else [],
@@ -1737,7 +1744,46 @@ def run(args: argparse.Namespace): # main
 			legend_handles.append(broken_marker_full)
 		if legend_handles:
 			ax_full.legend(handles=legend_handles, loc="upper right", framealpha=0.9, title="Objets / Materiaux")
-		return fig, ax_full, {"mesh_scatter": mesh_scatter, "full_surface": full_surface, "mesh_ax": ax_mesh, "full_ax": ax_full, "region_fills": region_fills, "region_edges": region_edges, "burned_tetra_surface": burned_tetra_surface, "source_marker_mesh": source_marker_mesh, "source_marker_full": source_marker_full, "broken_marker_mesh": broken_marker_mesh, "broken_marker_full": broken_marker_full}
+		return fig, ax_full, {"mesh_scatter": mesh_scatter, "full_surface": full_surface, "mesh_ax": ax_mesh, "full_ax": ax_full, "region_fills": region_fills, "region_edges": region_edges, "burned_tetra_surface": burned_tetra_surface, "source_marker_mesh": source_marker_mesh, "source_marker_full": source_marker_full, "source_beacon_mesh": source_beacon_mesh, "source_beacon_full": source_beacon_full, "broken_marker_mesh": broken_marker_mesh, "broken_marker_full": broken_marker_full}
+
+	def _setup_3d_initial_overview(local_t: np.ndarray):
+		fig = plt.figure(figsize=(20, 7))
+		ax_mesh = fig.add_subplot(131, projection="3d")
+		ax_full = fig.add_subplot(132, projection="3d")
+		ax_setup = fig.add_subplot(133, projection="3d")
+
+		edges = _build_boundary_edges(visual_faces)
+		segments = [[pts[i], pts[j]] for i, j in edges]
+		ax_mesh.add_collection3d(Line3DCollection(segments, colors="black", linewidths=0.2, alpha=0.55))
+		ax_mesh.scatter(pts[:, 0], pts[:, 1], pts[:, 2], s=2, c="#444444", alpha=0.28, depthshade=False)
+
+		_add_region_overlays_3d(ax_full, pts, visual_faces, visual_phys, visual_regions, include_solid_fill=False)
+		_add_region_overlays_3d(ax_full, pts, visual_faces, visual_phys, visual_regions, include_solid_fill=True)
+		_add_region_edges_3d(ax_full, pts, visual_faces, visual_phys, visual_regions)
+
+		face_temps = np.mean(local_t[visual_faces], axis=1)
+		norm = Normalize(vmin=THERMAL_3D_VMIN, vmax=THERMAL_3D_VMAX)
+		setup_surface = Poly3DCollection(
+			[pts[face] for face in visual_faces],
+			facecolors=THERMAL_CMAP_3D(norm(face_temps)),
+			edgecolors="none",
+			linewidths=0.0,
+			alpha=0.60,
+		)
+		ax_setup.add_collection3d(setup_surface)
+		_add_region_overlays_3d(ax_setup, pts, visual_faces, visual_phys, visual_regions, include_solid_fill=True)
+		_add_region_edges_3d(ax_setup, pts, visual_faces, visual_phys, visual_regions)
+		_add_source_marker_3d(ax_setup, src_x, src_y, src_z, src_temp, pts)
+
+		ax_mesh.set_title("Maillage 3D")
+		ax_full.set_title("Batiment 3D plein")
+		ax_setup.set_title("Setup initial")
+		for local_ax in (ax_mesh, ax_full, ax_setup):
+			local_ax.set_xlabel("x")
+			local_ax.set_ylabel("y")
+			local_ax.set_zlabel("z")
+			_set_equal_3d_axes(local_ax, pts)
+		return fig
 
 	output_dir = animation_path = setup_png_path = timings_csv_path = None
 	if getattr(args, "save", None):
@@ -1748,22 +1794,18 @@ def run(args: argparse.Namespace): # main
 
 	if args.plot:
 		if dim == 3:
-			fig_mesh, _ax_mesh = _plot_3d_mesh_preview(pts, visual_faces, "Maillage 3D")
-			#plt.tight_layout()
-			plt.show()
-			plt.close(fig_mesh)
-			fig_full, _ax_full = _plot_3d_filled_preview(pts, visual_faces, visual_phys, visual_regions, "Batiment 3D plein")
-			#plt.tight_layout()
-			plt.show()
-			plt.close(fig_full)
-		t0 = time.perf_counter()
-		fig_init, _ax_init, _visuals_init = _setup_axes(t, "Setup initial")
-		record_timing("initial_setup_figure", time.perf_counter() - t0)
-		#plt.tight_layout()
+			t0 = time.perf_counter()
+			fig_init = _setup_3d_initial_overview(t)
+			record_timing("initial_setup_figure", time.perf_counter() - t0, details="3d_overview_triptych")
+		else:
+			t0 = time.perf_counter()
+			fig_init, _ax_init, _visuals_init = _setup_axes(t, "Setup initial")
+			record_timing("initial_setup_figure", time.perf_counter() - t0)
 		if setup_png_path is not None:
 			t1 = time.perf_counter()
 			fig_init.savefig(setup_png_path, dpi=200, bbox_inches="tight")
 			record_timing("initial_setup_png_save", time.perf_counter() - t1, details=str(setup_png_path))
+		#plt.tight_layout()
 		plt.show()
 		plt.close(fig_init)
 	elif setup_png_path is not None:
@@ -1796,6 +1838,10 @@ def run(args: argparse.Namespace): # main
 			burned_collection = visuals["burned_collection"]
 			field.set_array(local_t)
 			burned_collection.set_verts(_burned_triangle_vertices(pts, elems, burned_elements) if show_burned_elements else [])
+			visible = source_visible(sim_time)
+			visuals["source_marker"].set_visible(visible)
+			if visuals.get("source_radius_patch") is not None:
+				visuals["source_radius_patch"].set_visible(visible)
 			ax.set_title(f"Temps: {sim_time:.1f}s | Tmax: {np.max(local_t):.1f}K")
 			return [field, burned_collection]
 		else:
@@ -1806,6 +1852,13 @@ def run(args: argparse.Namespace): # main
 			broken_marker_full = visuals["broken_marker_full"]
 			mesh_ax = visuals["mesh_ax"]
 			full_ax = visuals["full_ax"]
+			visible = source_visible(sim_time)
+			visuals["source_marker_mesh"].set_visible(visible)
+			visuals["source_marker_full"].set_visible(visible)
+			if visuals.get("source_beacon_mesh") is not None:
+				visuals["source_beacon_mesh"].set_visible(visible)
+			if visuals.get("source_beacon_full") is not None:
+				visuals["source_beacon_full"].set_visible(visible)
 			mesh_scatter.set_array(local_t)
 			mesh_scatter.set_clim(vmin=THERMAL_3D_VMIN, vmax=THERMAL_3D_VMAX)
 			face_temps = np.mean(local_t[visual_faces], axis=1)
