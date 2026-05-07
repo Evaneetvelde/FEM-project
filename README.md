@@ -39,7 +39,11 @@ FEM-project/
 |   |-- default_2d.txt
 |   |-- default_3d.txt
 |   |-- bois-air-bois.geo
-|   `-- bois-air-bois.msh
+|   |-- bois-air-bois.msh
+|   |-- raclette.geo                  
+|   |-- raclette.msh
+|   |-- raclette.txt                  
+|   `-- perf/                         # maillages de benchmark acceptes par --mesh
 `-- old/
 |   |-- mainnotopti.py                  # version de comparaison non optimisee
 |   |-- maincalculmatriciel.py          # etape calcul matriciel/preassemblage
@@ -47,8 +51,8 @@ FEM-project/
 |   |-- main_notelementwise_notopti.py  # version antérieur sans burn 
 |   |-- diffusion_2D_fem.py             # prototype 2D
 |   `-- diffusion_3D_fem.py             # prototype 3d
-`-- perfs/
-    `-- perfs.py                      # script testant les performances temporels des différents main
+`-- perf/
+    `-- perf.py                       # script testant les performances temporelles des 
 ```
 
 ## Installation
@@ -91,7 +95,7 @@ python main.py --3d
 Utiliser un maillage precis :
 
 ```bash
-python main.py --mesh bois-air-bois.msh --2d
+python main.py --mesh bois-air-bois.msh 
 ```
 
 ## Scenarios txt
@@ -100,7 +104,10 @@ Au lancement, `main.py` cherche un fichier de scenario texte associe au maillage
 
 1. le fichier `.txt` a cote du `.msh`, par exemple `models/piece.txt` pour `models/piece.msh` ;
 2. sinon `models/<nom_du_msh>.txt`, par exemple `models/piece.txt` ;
-3. sinon `models/default_2d.txt` ou `models/default_3d.txt` selon la dimension.
+3. sinon `models/perf/<nom_du_msh>.txt` pour les maillages de benchmark ;
+4. sinon `models/default_2d.txt` ou `models/default_3d.txt` selon la dimension.
+
+Les fichiers `default_2d.txt` et `default_3d.txt` sont la source de verite des valeurs par defaut. Le code ne garde plus de gros dictionnaire numerique de scenario en secours : si le fichier par defaut manque, le lancement echoue explicitement.
 
 Les options donnees en ligne de commande gardent la priorite sur le fichier texte. Le format est volontairement simple :
 
@@ -110,9 +117,12 @@ steps=2000
 h_conv=50.0
 horizontal_air_transfer=1
 src_x=0.3
+source_time=0.0
 ```
 
 Les commentaires avec `#` sont acceptes. Les noms d'options utilisent les memes noms que dans le code, avec `_` au lieu de `-`.
+
+`source_time` indique combien de secondes simulees la source reste active. `0.0` garde le comportement historique : la zone source est seulement initialisee a `src_temp`. Avec une valeur positive, les noeuds de la zone source sont maintenus a `src_temp` jusqu'a ce temps.
 
 ## Versions
 
@@ -131,7 +141,7 @@ Les commentaires avec `#` sont acceptes. Les noms d'options utilisent les memes 
 
 | Option | Description |
 |---|---|
-| `--2d`, `--3d` | Force la dimension du calcul. |
+| `-2d`, `--2d`, `-3d`, `--3d` | Force la dimension du calcul. |
 | `--mesh` | Nom ou chemin du maillage `.msh`. |
 | `--dt` | Pas de temps. |
 | `--steps` | Nombre de frames ou pas affiches. |
@@ -157,6 +167,7 @@ Les commentaires avec `#` sont acceptes. Les noms d'options utilisent les memes 
 | `--src-temp` | Temperature initiale de la source. |
 | `--src-x`, `--src-y`, `--src-z` | Position de la source. |
 | `--src-radius` | Rayon initial de la source. |
+| `--source-time`, `--temps-source`, `--temps-sources` | Temps simule pendant lequel la source reste active. `0` signifie source initiale seulement. |
 | `--no-plot` | Desactive l'affichage interactif. |
 | `--hide-burned-elements` | Masque la couche noire des elements brules sans changer le calcul. |
 | `--save` | Sauvegarde une animation MP4 et les timings. |
@@ -173,6 +184,33 @@ Les commentaires avec `#` sont acceptes. Les noms d'options utilisent les memes 
 | `--node-thaw-delta` | Ecart de temperature avec un voisin declenchant le degel. |
 | `--node-thaw-margin` | Marge sous `Tc` d'un voisin declenchant le degel. |
 | `--max-frozen-node-fraction` | Fraction maximale de noeuds geles. |
+
+## Visualisation 3D
+
+En 3D, le lancement interactif affiche d'abord une seule figure de previsualisation avec trois panneaux :
+
+- le maillage 3D ;
+- la vue pleine des materiaux ;
+- le setup initial avec la temperature et la source.
+
+Les interfaces internes entre materiaux differents sont incluses dans la visualisation, meme si elles ne sont pas des frontieres physiques du domaine. Cela permet de voir un objet immerge dans un volume d'air, par exemple le PTFE dans le cube d'air du cas raclette. Les vraies conditions de convection restent appliquees uniquement aux faces exterieures du domaine.
+
+Le marqueur de source est affiche au debut et reste visible tant que `source_time` n'est pas depasse. En 3D, il est accompagne de trois lignes rouges traversantes pour rester visible meme quand la source est a l'interieur d'un volume.
+
+## Cas raclette
+
+Le modele `models/raclette.geo` decrit un poelon creux en PTFE place dans un bloc d'air de `20 x 20 x 20`. Le maillage `models/raclette.msh` contient deux IDs physiques :
+
+| ID | Materiau | Role |
+|---:|---|---|
+| 5 | `air` | bloc englobant |
+| 11 | `ptfe` | poelon et poignee |
+
+Le fichier `models/raclette.txt` donne le scenario associe. Il est automatiquement charge avec :
+
+```bash
+python main.py --3d --mesh raclette.msh
+```
 
 ### Materiaux et IDs physiques
 
@@ -192,6 +230,8 @@ Les materiaux sont definis dans `materialsbank.py`.
 | 10 | `vegetation` | combustible vegetal, propagation de flamme |
 | 11 | `ptfe` | polymere fluore isolant, non structurel |
 | 12 | `acier` | acier structurel parametrable dans `materialsbank.py` |
+
+`teflon` est accepte comme alias de `ptfe`. Pour faciliter la lecture des objets dans les volumes d'air, `ptfe`/`teflon` et `acier` utilisent une opacite visuelle elevee dans les rendus.
 
 Chaque materiau possede aussi une variante `*_burn`. Quand un element depasse son seuil `Tc`, il passe dans son etat brule : ses proprietes thermiques sont modifiees et son HRR suit la loi du materiau.
 
@@ -286,6 +326,7 @@ Le modele est volontairement simplifie pour rester calculable rapidement et lisi
 - Le HRR est une puissance volumique imposee par materiau.
 - L'allumage se fait par seuil `Tc` sur la temperature moyenne de l'element.
 - Les proprietes brulees sont approximees par une variante `*_burn`.
+- La source initiale peut etre maintenue active pendant `source_time` secondes simulees en imposant `src_temp` sur les noeuds du rayon source.
 
 ### Conditions aux frontieres
 
@@ -305,6 +346,7 @@ Le modele est volontairement simplifie pour rester calculable rapidement et lisi
 - Le facteur utilise est attenue avec la hauteur et un rayon horizontal.
 - En 2D et 3D, le transfert horizontal par mouvements d'air redistribue une fraction plafonnee du HRR vers les elements voisins non brules.
 - Cet effet horizontal est pilote par un rayon, une attenuation avec la distance et une fraction maximale de puissance.
+- Le transfert horizontal travaille actuellement sur les centroïdes des elements proches. Il ne filtre pas seulement les elements ou faces d'air.
 
 ### Add-on structure fun
 
@@ -320,6 +362,7 @@ Le modele est volontairement simplifie pour rester calculable rapidement et lisi
 - Les materiaux sont constants par element.
 - Les contacts entre materiaux sont geres par le maillage, pas par une loi de contact detaillee.
 - Les noeuds doublons sont fusionnes par coordonnees arrondies pour reparer certains maillages non conformes.
+- En 3D avec plusieurs volumes, les interfaces entre materiaux peuvent etre affichees pour la lecture visuelle, sans etre utilisees comme frontieres convectives.
 
 ## Optimisations apportées
 
@@ -357,6 +400,7 @@ Numba utilisé dans l'assemblage des quadratures, matrice local unitaire, et les
 - Les noeuds quasi stationnaires peuvent etre temporairement geles par condition de Dirichlet.
 - Ils sont degeles si leurs voisins changent trop ou deviennent proches de l'allumage.
 - Cela reduit le nombre de degres de liberte actifs quand une grande partie du domaine ne bouge plus.
+- Ce gel ne retire pas les elements des matrices FEM globales. Le solveur reste global ; sur de gros volumes d'air mailles, le cout principal reste donc la resolution sparse sur tout le domaine.
 
 ## Ameliorations possibles
 
