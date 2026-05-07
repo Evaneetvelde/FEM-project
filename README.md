@@ -106,7 +106,6 @@ Au lancement, `main.py` cherche un fichier de scenario texte associe au maillage
 2. sinon `models/default_2d.txt` ou `models/default_3d.txt` selon la dimension.
 
 Les fichiers `default_2d.txt` et `default_3d.txt` sont la source de verite des valeurs par defaut. 
-```
 
 ## Versions
 
