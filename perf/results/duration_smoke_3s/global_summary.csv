@@ -1,0 +1,13 @@
+group,version_order,version_id,version_label,mesh_runs,total_measured_compute,avg_measured_compute,total_wall_seconds,avg_wall_seconds,total_frames,avg_frame_seconds,speedup_vs_main_sans_rien,gain_pct_vs_main_sans_rien,gain_pct_vs_previous_version
+all,1,main_sans_rien,Main sans optimisation,2,10.537273,5.268636,17.792802,8.896401,1212,0.004939,1.000000,0.00,0.00
+all,2,fancy_reassembling,Fancy reassembling,2,10.644748,5.322374,17.332800,8.666400,472,0.012744,0.989903,-1.02,-1.02
+all,3,calcul_matriciel,Calcul matriciel,2,12.254570,6.127285,19.428182,9.714091,1297,0.004614,0.859865,-16.30,-15.12
+all,4,main_opti,Main opti,2,12.155991,6.077996,19.436694,9.718347,457,0.013134,0.866838,-15.36,0.80
+2D,1,main_sans_rien,Main sans optimisation,1,3.736391,3.736391,7.102413,7.102413,1122,0.002656,1.000000,0.00,0.00
+2D,2,fancy_reassembling,Fancy reassembling,1,3.736966,3.736966,6.882825,6.882825,386,0.007762,0.999846,-0.02,-0.02
+2D,3,calcul_matriciel,Calcul matriciel,1,5.797339,5.797339,9.250911,9.250911,1181,0.002523,0.644501,-55.16,-55.13
+2D,4,main_opti,Main opti,1,5.696648,5.696648,9.322627,9.322627,375,0.008002,0.655893,-52.46,1.74
+3D,1,main_sans_rien,Main sans optimisation,1,6.800882,6.800882,10.690389,10.690389,90,0.033395,1.000000,0.00,0.00
+3D,2,fancy_reassembling,Fancy reassembling,1,6.907782,6.907782,10.449975,10.449975,86,0.035108,0.984525,-1.57,-1.57
+3D,3,calcul_matriciel,Calcul matriciel,1,6.457231,6.457231,10.177271,10.177271,116,0.025900,1.053220,5.05,6.52
+3D,4,main_opti,Main opti,1,6.459343,6.459343,10.114067,10.114067,82,0.036601,1.052875,5.02,-0.03

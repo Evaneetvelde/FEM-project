@@ -1,0 +1,4 @@
+Using mesh: C:\Users\ericv\OneDrive\Documents\UNIF\Q6\Elements finis\projet\FEM-project\models\perf\plot_2d_small.msh
+Using scenario: C:\Users\ericv\OneDrive\Documents\UNIF\Q6\Elements finis\projet\FEM-project\models\default_2d.txt
+
+Maillage charge: 268 noeuds, 490 elements (2D).

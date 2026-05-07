@@ -1,0 +1,3 @@
+mesh_id,mesh_label,mesh_dim,mesh_category,mesh_path,nodes,elements
+2d_peu_noeuds,2D peu de noeuds,2,peu,models\perf\plot_2d_small.msh,268,490
+3d_peu_noeuds,3D peu de noeuds,3,peu,models\perf\plot_3d_small.msh,501,1097

@@ -1,0 +1,3 @@
+Using mesh: C:\Users\ericv\OneDrive\Documents\UNIF\Q6\Elements finis\projet\FEM-project\models\perf\perf_2d_middle.msh
+
+Maillage charge: 779 noeuds, 1464 elements (2D).

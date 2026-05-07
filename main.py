@@ -2020,6 +2020,8 @@ def run(args: argparse.Namespace): # main
 
 	if not args.plot:
 		t0 = time.perf_counter()
+		max_wall_seconds = float(getattr(args, "max_wall_seconds", 0.0) or 0.0)
+		actual_frames = 0
 		if getattr(args, "save", None):
 			headless_frames = [t.copy()]
 			headless_times = [0.0]
@@ -2030,6 +2032,9 @@ def run(args: argparse.Namespace): # main
 				headless_frames.append(t.copy())
 				headless_times.append(sim_time)
 				headless_burned.append(burned_elements.copy())
+				actual_frames = frame_idx + 1
+				if max_wall_seconds > 0.0 and time.perf_counter() - t0 >= max_wall_seconds:
+					break
 			state["t"] = t
 			state["time"] = headless_times[-1]
 
@@ -2043,9 +2048,12 @@ def run(args: argparse.Namespace): # main
 			for frame_idx in range(steps):
 				t, sim_time, elapsed = advance_state(t, sim_time)
 				record_timing("frame_calculation", elapsed, frame=frame_idx, details=f"sim_time={sim_time:.5f}")
+				actual_frames = frame_idx + 1
+				if max_wall_seconds > 0.0 and time.perf_counter() - t0 >= max_wall_seconds:
+					break
 			state["t"] = t
 			state["time"] = sim_time
-		record_timing("headless_calculation_total", time.perf_counter() - t0, details=f"frames={steps};dim={dim}")
+		record_timing("headless_calculation_total", time.perf_counter() - t0, details=f"frames={actual_frames};requested_frames={steps};dim={dim}")
 	else:
 		def update_anim(frame_idx: int, local_state: dict[str, np.ndarray]):
 			t_local, sim_time, _elapsed = advance_state(local_state["t"], float(local_state["time"]))
@@ -2126,6 +2134,7 @@ def build_parser() -> argparse.ArgumentParser: # terminal
 	parser.add_argument("--hide-burned-elements", dest="hide_burned_elements", action="store_true", help="Masque l'affichage noir des elements brules sans desactiver leur calcul")
 	parser.add_argument("--save", dest="save", type=str, default=None, help="Nom de fichier MP4 pour sauvegarder l'animation")
 	parser.add_argument("--timings-csv", dest="timings_csv", type=str, default=None, help="Chemin CSV pour sauvegarder les timings sans exporter d'animation")
+	parser.add_argument("--max-wall-seconds", dest="max_wall_seconds", type=float, default=None, help="Arrete proprement le calcul headless apres cette duree murale.")
 	parser.set_defaults(plot=True)
 	return parser
 
