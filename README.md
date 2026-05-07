@@ -103,26 +103,10 @@ python main.py --mesh bois-air-bois.msh
 Au lancement, `main.py` cherche un fichier de scenario texte associe au maillage :
 
 1. le fichier `.txt` a cote du `.msh`, par exemple `models/piece.txt` pour `models/piece.msh` ;
-2. sinon `models/<nom_du_msh>.txt`, par exemple `models/piece.txt` ;
-3. sinon `models/perf/<nom_du_msh>.txt` pour les maillages de benchmark ;
-4. sinon `models/default_2d.txt` ou `models/default_3d.txt` selon la dimension.
+2. sinon `models/default_2d.txt` ou `models/default_3d.txt` selon la dimension.
 
-Les fichiers `default_2d.txt` et `default_3d.txt` sont la source de verite des valeurs par defaut. Le code ne garde plus de gros dictionnaire numerique de scenario en secours : si le fichier par defaut manque, le lancement echoue explicitement.
-
-Les options donnees en ligne de commande gardent la priorite sur le fichier texte. Le format est volontairement simple :
-
-```text
-dt=50.0
-steps=2000
-h_conv=50.0
-horizontal_air_transfer=1
-src_x=0.3
-source_time=0.0
+Les fichiers `default_2d.txt` et `default_3d.txt` sont la source de verite des valeurs par defaut. 
 ```
-
-Les commentaires avec `#` sont acceptes. Les noms d'options utilisent les memes noms que dans le code, avec `_` au lieu de `-`.
-
-`source_time` indique combien de secondes simulees la source reste active. `0.0` garde le comportement historique : la zone source est seulement initialisee a `src_temp`. Avec une valeur positive, les noeuds de la zone source sont maintenus a `src_temp` jusqu'a ce temps.
 
 ## Versions
 
@@ -185,33 +169,6 @@ Les commentaires avec `#` sont acceptes. Les noms d'options utilisent les memes 
 | `--node-thaw-margin` | Marge sous `Tc` d'un voisin declenchant le degel. |
 | `--max-frozen-node-fraction` | Fraction maximale de noeuds geles. |
 
-## Visualisation 3D
-
-En 3D, le lancement interactif affiche d'abord une seule figure de previsualisation avec trois panneaux :
-
-- le maillage 3D ;
-- la vue pleine des materiaux ;
-- le setup initial avec la temperature et la source.
-
-Les interfaces internes entre materiaux differents sont incluses dans la visualisation, meme si elles ne sont pas des frontieres physiques du domaine. Cela permet de voir un objet immerge dans un volume d'air, par exemple le PTFE dans le cube d'air du cas raclette. Les vraies conditions de convection restent appliquees uniquement aux faces exterieures du domaine.
-
-Le marqueur de source est affiche au debut et reste visible tant que `source_time` n'est pas depasse. En 3D, il est accompagne de trois lignes rouges traversantes pour rester visible meme quand la source est a l'interieur d'un volume.
-
-## Cas raclette
-
-Le modele `models/raclette.geo` decrit un poelon creux en PTFE place dans un bloc d'air de `20 x 20 x 20`. Le maillage `models/raclette.msh` contient deux IDs physiques :
-
-| ID | Materiau | Role |
-|---:|---|---|
-| 5 | `air` | bloc englobant |
-| 11 | `ptfe` | poelon et poignee |
-
-Le fichier `models/raclette.txt` donne le scenario associe. Il est automatiquement charge avec :
-
-```bash
-python main.py --3d --mesh raclette.msh
-```
-
 ### Materiaux et IDs physiques
 
 Les materiaux sont definis dans `materialsbank.py`.
@@ -229,9 +186,6 @@ Les materiaux sont definis dans `materialsbank.py`.
 | 9 | `viande` | matiere organique humide, combustion moderee |
 | 10 | `vegetation` | combustible vegetal, propagation de flamme |
 | 11 | `ptfe` | polymere fluore isolant, non structurel |
-| 12 | `acier` | acier structurel parametrable dans `materialsbank.py` |
-
-`teflon` est accepte comme alias de `ptfe`. Pour faciliter la lecture des objets dans les volumes d'air, `ptfe`/`teflon` et `acier` utilisent une opacite visuelle elevee dans les rendus.
 
 Chaque materiau possede aussi une variante `*_burn`. Quand un element depasse son seuil `Tc`, il passe dans son etat brule : ses proprietes thermiques sont modifiees et son HRR suit la loi du materiau.
 
@@ -346,9 +300,10 @@ Le modele est volontairement simplifie pour rester calculable rapidement et lisi
 - Le facteur utilise est attenue avec la hauteur et un rayon horizontal.
 - En 2D et 3D, le transfert horizontal par mouvements d'air redistribue une fraction plafonnee du HRR vers les elements voisins non brules.
 - Cet effet horizontal est pilote par un rayon, une attenuation avec la distance et une fraction maximale de puissance.
-- Le transfert horizontal travaille actuellement sur les centroïdes des elements proches. Il ne filtre pas seulement les elements ou faces d'air.
 
 ### Add-on structure fun
+
+WIP
 
 - L'option `--structural-fun` active un calcul volontairement simplifie des charges de poids en 3D.
 - Le module independant `structural_fun.py` calcule les volumes, les poids propres et une reprise de charge vers les elements sous-jacents.
@@ -438,10 +393,11 @@ Cela demanderait des equations de conservation de masse, quantite de mouvement e
 
 ## sources
 
-le template du prof
+Staff LEPL1110 - Elements finis, Exemple diffusion 1D-2D, 2026, https://moodle.uclouvain.be/mod/resource/view.php?id=643760, consulté en mars 2026
 
-les différentes recherche sur la combustion
+F. Lam, X. Mi, and A. J. Higgins, Front Roughening of Flames in Discrete Media, 2018, https://arxiv.org/pdf/1701.07167, consulté en mars 2026
 
-le hrr
+M. Karttunen, N. Provatas, T. Ala-Nissila, and M. Grant, Nucleation, growth, and scaling in slow combustion, 2018, https://arxiv.org/pdf/cond-mat/9701209, consulté en mars 2026
 
-un article sur les incendies ?
+A. Baragiola, Fire Dynamics simulator, https://fdstutorial.com/heat-release-rate-hrr-curve-calculation/?fbclid=IwY2xjawRpKR1leHRuA2FlbQIxMABicmlkETB5TTJUUDdZa1cyRFBQcFBac3J0YwZhcHBfaWQQMjIyMDM5MTc4ODIwMDg5MgABHp2Y12DiFar5iUZotSwNWqnsGnMkLupN-I6febs9EB0TEb-8kKD5y7QwyaF9_aem_6QEMnCSkycnIaFEJHzJsYg, 2026, consulté en avril 2026
+
